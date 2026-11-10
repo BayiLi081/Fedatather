@@ -1,0 +1,15 @@
+# Run after a public build. Uses an isolated profile and original local demo content.
+$ErrorActionPreference = 'Stop'
+$root = Split-Path $PSScriptRoot -Parent
+$out = Join-Path $root 'build\screenshots'
+New-Item -ItemType Directory -Force $out | Out-Null
+$core = Join-Path $root 'dist\Microsoft.Web.WebView2.Core.dll'
+Copy-Item $core, (Join-Path $root 'dist\WebView2Loader.dll') $out -Force
+$csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+$sources = @(Get-ChildItem (Join-Path $root 'src\*.cs') | Where-Object { $_.Name -ne 'Program.cs' } | ForEach-Object { $_.FullName })
+$sources += Join-Path $PSScriptRoot 'CaptureScreenshots.cs'
+$exe = Join-Path $out 'CaptureScreenshots.exe'
+& $csc /nologo /target:exe /platform:x64 /langversion:5 "/out:$exe" "/reference:$core" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll "/resource:$(Join-Path $root 'assets\boss_public.jpg'),Fedatather.BossImage" $sources
+if ($LASTEXITCODE -ne 0) { throw 'Screenshot tool compilation failed.' }
+& $exe $root
+if ($LASTEXITCODE -ne 0) { throw 'Screenshot capture failed.' }

@@ -1,0 +1,63 @@
+# Build output (recreate with: powershell -ExecutionPolicy Bypass -File .\build.ps1)
+dist/
+build/
+
+# Compiled / packaged binaries anywhere else
+*.exe
+*.dll
+*.pdb
+*.ico
+*.nupkg
+*.gz
+
+# Editor and IDE files
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+
+# Windows clutter
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Logs and scratch files
+*.log
+*.tmp
+
+# Local credentials and agent state
+.aws/
+.ssh/
+.agents/
+.codex/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+credentials.json
+secrets.json
+
+# Browser profiles, saved pages, exports, and machine-specific shortcuts
+WebView2/
+User Data/
+*.ini
+*.folded.json
+*.lnk
+exports/
+downloads/
+private/
+
+# Personal Boss image: public builds use the original public replacement
+assets/boss_here.jpg
+
+# Python release-tool caches and environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
