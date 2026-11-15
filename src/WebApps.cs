@@ -16,14 +16,16 @@ using Microsoft.Web.WebView2.Core;
 namespace Fedatather
 {
     // What the command line asked for. Web-app shortcuts launch:
-    //   Fedatather.exe --app=<id> "--name=<name>" "--url=<url>" [--size=phone|full] [--pin]
+    //   Fedatather.exe --app=<id> "--name=<name>" "--url=<url>" ["--url2=<url>"] [--size=phone|full] [--pin]
+    // A dual app (--url2) shows both pages at once in the phone window, split top and bottom.
     sealed class LaunchOptions
     {
-        public string Url, AppId, AppName;
+        public string Url, Url2, AppId, AppName;
         public string Size; // "phone" | "full" = fixed size; null = switchable
         public bool Pin;
 
         public bool IsApp { get { return AppId != null; } }
+        public bool IsDual { get { return IsApp && !string.IsNullOrEmpty(Url2); } }
 
         public static LaunchOptions Parse(string[] args)
         {
@@ -32,19 +34,21 @@ namespace Fedatather
             {
                 if (a.StartsWith("--app=")) o.AppId = WebApps.CleanId(a.Substring(6));
                 else if (a.StartsWith("--url=")) o.Url = a.Substring(6);
+                else if (a.StartsWith("--url2=")) o.Url2 = a.Substring(7);
                 else if (a.StartsWith("--name=")) o.AppName = a.Substring(7);
                 else if (a == "--size=phone") o.Size = "phone";
                 else if (a == "--size=full") o.Size = "full";
                 else if (a == "--pin") o.Pin = true;
                 else if (!a.StartsWith("--") && o.Url == null) o.Url = a;
             }
+            if (o.IsDual) o.Size = "phone"; // two pages stacked top and bottom: always the phone window
             return o;
         }
     }
 
     sealed class WebAppSpec
     {
-        public string Name, Url, Size;
+        public string Name, Url, Url2, Size; // Url2: the bottom page of a dual app, else null
         public bool Pin, Desktop, StartMenu;
         public Bitmap Icon;
     }
@@ -101,7 +105,7 @@ namespace Fedatather
         public static SavedApp Save(WebAppSpec spec)
         {
             SavedApp saved = new SavedApp();
-            saved.Id = MakeId(spec.Name, spec.Url);
+            saved.Id = MakeId(spec.Name, spec.Url2 == null ? spec.Url : spec.Url + "\n" + spec.Url2);
             Directory.CreateDirectory(AppsDir);
 
             string icon = null;
@@ -114,11 +118,12 @@ namespace Fedatather
             saved.Arguments = "--app=" + saved.Id +
                 " \"--name=" + spec.Name.Replace("\"", "") + "\"" +
                 " \"--url=" + spec.Url.Replace("\"", "%22") + "\"" +
+                (spec.Url2 != null ? " \"--url2=" + spec.Url2.Replace("\"", "%22") + "\"" : "") +
                 (spec.Size != null ? " --size=" + spec.Size : "") +
                 (spec.Pin ? " --pin" : "");
 
             string file = SafeFileName(spec.Name) + ".lnk";
-            string description = spec.Name + " (Fedatather web app)";
+            string description = spec.Name + (spec.Url2 != null ? " (Fedatather dual web app)" : " (Fedatather web app)");
             if (spec.Desktop)
             {
                 CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), file),
@@ -147,18 +152,7 @@ namespace Fedatather
         // ------------------------------------------------------------ icons
 
         // Largest raster icon the page declares (apple-touch-icon beats a 16px favicon), else /favicon.ico.
-        const string IconScript = @"(function () {
-  var best = null, bestSize = -1;
-  var links = document.querySelectorAll('link[rel~=icon], link[rel~=apple-touch-icon], link[rel~=apple-touch-icon-precomposed]');
-  for (var i = 0; i < links.length; i++) {
-    var l = links[i];
-    if (!l.href || /\.svg(\?|#|$)/i.test(l.href) || l.type === 'image/svg+xml') continue;
-    var m = /(\d+)x(\d+)/i.exec(l.getAttribute('sizes') || '');
-    var s = m ? parseInt(m[1], 10) : (/apple-touch/i.test(l.rel) ? 180 : 32);
-    if (s > bestSize) { best = l.href; bestSize = s; }
-  }
-  return best || (location.origin + '/favicon.ico');
-})()";
+        static readonly string IconScript = Embedded.Text("app-icon.js");
 
         public static async Task<Bitmap> FetchIconAsync(CoreWebView2 web, string userAgent)
         {
@@ -358,7 +352,8 @@ namespace Fedatather
     {
         readonly Theme theme;
         readonly float scale;
-        readonly TextBox nameBox, urlBox;
+        readonly TextBox nameBox, urlBox, url2Box;
+        readonly CheckBox dualBox;
         readonly ComboBox sizeBox;
         readonly CheckBox pinBox, desktopBox, startBox;
         readonly PictureBox iconBox;
@@ -372,7 +367,8 @@ namespace Fedatather
         static readonly string[] SizeLabels = { "Phone size (fixed)", "Full screen (fixed)", "Switchable (remembers last)" };
         static readonly string[] SizeValues = { "phone", "full", null };
 
-        public SaveAppDialog(Theme theme, float scale, string name, string url, bool pinned, Task<Bitmap> iconTask)
+        // url2: the bottom page while the phone window is split top and bottom; offers saving both as one dual app.
+        public SaveAppDialog(Theme theme, float scale, string name, string url, string url2, bool pinned, Task<Bitmap> iconTask)
         {
             this.theme = theme;
             this.scale = scale;
@@ -388,7 +384,8 @@ namespace Fedatather
             Font = new Font("Segoe UI", 9f);
             BackColor = theme.Bar;
             ForeColor = theme.Fore;
-            ClientSize = new Size(S(360), S(330));
+            int dy = url2 != null ? S(84) : 0; // room for the dual-app choice and the bottom page's address
+            ClientSize = new Size(S(360), S(330) + dy);
 
             ToolTip tips = new ToolTip();
             iconBox = new PictureBox();
@@ -403,10 +400,16 @@ namespace Fedatather
             AddLabel("Name", S(76), S(14));
             nameBox = AddTextBox(name, S(76), S(34), S(268));
 
-            AddLabel("Address", S(16), S(80));
+            AddLabel(url2 != null ? "Address (top page)" : "Address", S(16), S(80));
             urlBox = AddTextBox(url, S(16), S(100), S(328));
+            if (url2 != null)
+            {
+                dualBox = AddCheck("Dual app: open both pages, top and bottom", true, S(16), S(132));
+                AddLabel("Bottom page address", S(16), S(160));
+                url2Box = AddTextBox(url2, S(16), S(180), S(328));
+            }
 
-            AddLabel("Window size", S(16), S(136));
+            AddLabel("Window size", S(16), S(136) + dy);
             sizeBox = new ComboBox();
             sizeBox.DropDownStyle = ComboBoxStyle.DropDownList;
             sizeBox.FlatStyle = FlatStyle.Flat;
@@ -414,16 +417,28 @@ namespace Fedatather
             sizeBox.ForeColor = theme.Fore;
             sizeBox.Items.AddRange(SizeLabels);
             sizeBox.SelectedIndex = 0;
-            sizeBox.SetBounds(S(16), S(156), S(328), S(26));
+            sizeBox.SetBounds(S(16), S(156) + dy, S(328), S(26));
             Controls.Add(sizeBox);
+            if (dualBox != null)
+            {
+                // A dual app is always the phone window, split top and bottom.
+                EventHandler sync = delegate
+                {
+                    url2Box.Enabled = dualBox.Checked;
+                    sizeBox.Enabled = !dualBox.Checked;
+                    if (dualBox.Checked) sizeBox.SelectedIndex = 0;
+                };
+                dualBox.CheckedChanged += sync;
+                sync(null, EventArgs.Empty);
+            }
 
-            pinBox = AddCheck("Start pinned on top", pinned, S(16), S(194));
-            AddLabel("Create shortcut on", S(16), S(226));
-            desktopBox = AddCheck("Desktop", true, S(16), S(246));
-            startBox = AddCheck("Start menu", true, S(130), S(246));
+            pinBox = AddCheck("Start pinned on top", pinned, S(16), S(194) + dy);
+            AddLabel("Create shortcut on", S(16), S(226) + dy);
+            desktopBox = AddCheck("Desktop", true, S(16), S(246) + dy);
+            startBox = AddCheck("Start menu", true, S(130), S(246) + dy);
 
-            saveBtn = AddButton("Save", true, S(180), S(286));
-            cancelBtn = AddButton("Cancel", false, S(264), S(286));
+            saveBtn = AddButton("Save", true, S(180), S(286) + dy);
+            cancelBtn = AddButton("Cancel", false, S(264), S(286) + dy);
             saveBtn.Click += OnSave;
             cancelBtn.DialogResult = DialogResult.Cancel;
             AcceptButton = saveBtn;
@@ -540,6 +555,16 @@ namespace Fedatather
                 Warn("Enter a web address (http or https).", urlBox);
                 return;
             }
+            string url2 = null;
+            if (dualBox != null && dualBox.Checked)
+            {
+                url2 = BrowserForm.ToUrl(url2Box.Text);
+                if (url2 == null || !Regex.IsMatch(url2, "^(https?|file):", RegexOptions.IgnoreCase))
+                {
+                    Warn("Enter a web address (http or https) for the bottom page.", url2Box);
+                    return;
+                }
+            }
             if (!desktopBox.Checked && !startBox.Checked)
             {
                 Warn("Pick at least one place for the shortcut.", desktopBox);
@@ -557,7 +582,8 @@ namespace Fedatather
             Result = new WebAppSpec();
             Result.Name = name;
             Result.Url = url;
-            Result.Size = SizeValues[sizeBox.SelectedIndex];
+            Result.Url2 = url2;
+            Result.Size = url2 != null ? "phone" : SizeValues[sizeBox.SelectedIndex];
             Result.Pin = pinBox.Checked;
             Result.Desktop = desktopBox.Checked;
             Result.StartMenu = startBox.Checked;

@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang='en'><head><meta charset='utf-8'><title>Settings</title>
+<style>
+:root { --bg:#f7f7f7; --card:#fff; --text:#1b1b1b; --muted:#616161; --border:#e5e5e5; --field:#f7f7f7;
+  --hover:#f0f0f0; --press:#e8e8e8; --accent:#0f6cbd; --accent-text:#fff; --danger:#c42b1c;
+  --shadow:0 0 0 1px rgba(0,0,0,.05), 0 2px 4px rgba(0,0,0,.05); --head-shadow:0 2px 6px rgba(15,108,189,.18); }
+.dark { --bg:#202023; --card:#2b2b2e; --text:#f2f2f4; --muted:#a6a6ab; --border:#3a3a3e; --field:#333337;
+  --hover:#38383c; --press:#414145; --accent:#4cc2ff; --accent-text:#0b0b0b; --danger:#ff99a4;
+  --shadow:0 0 0 1px rgba(255,255,255,.05), 0 2px 4px rgba(0,0,0,.3); --head-shadow:0 2px 6px rgba(0,0,0,.45); }
+* { box-sizing:border-box; }
+html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+  font:14px 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif; }
+body { display:flex; overflow:hidden; }
+button, input, textarea { font:inherit; color:inherit; }
+button { background:none; border:0; border-radius:6px; cursor:pointer; padding:0; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, .row:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; display:block; }
+nav { width:248px; flex:none; padding:22px 12px; }
+nav h1 { font-size:22px; font-weight:600; margin:6px 12px 20px; }
+nav .item { display:flex; align-items:center; gap:12px; width:100%; padding:9px 12px; position:relative; text-align:left; }
+nav .item + .item { margin-top:2px; }
+nav .item[aria-current] { background:var(--hover); }
+nav .item[aria-current]::before { content:''; position:absolute; left:0; top:9px; bottom:9px; width:3px; border-radius:2px; background:var(--accent); }
+.checks { display:flex; flex-direction:column; margin:20px 0 0; }
+.check { display:flex; gap:14px; align-items:flex-start; padding:13px 4px; cursor:pointer; }
+.check + .check { border-top:1px solid var(--border); }
+.check input { width:18px; height:18px; margin:2px 0 0; flex:none; accent-color:var(--accent); cursor:pointer; }
+.check .name { font-size:15px; }
+.check .count { color:var(--muted); font-size:13px; margin-top:3px; line-height:1.4; }
+select.edit-input { max-width:280px; cursor:pointer; }
+select.edit-input option { background:var(--card); color:var(--text); }
+.hint { color:var(--muted); margin:16px 0 0; line-height:1.5; }
+.site-search { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.site-search .search { flex:1; width:auto; min-width:220px; }
+.site-list { margin-top:12px; }
+.site-list .row { cursor:default; padding:12px 6px; }
+.site-list .row:hover { background:none; }
+#main { flex:1; overflow:auto; min-width:0; }
+header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; padding:12px 24px; min-height:64px;
+  background:var(--card); box-shadow:var(--head-shadow); }
+header h2 { margin:0; font-size:16px; font-weight:600; flex:1; display:flex; align-items:center; gap:10px; min-width:0; }
+header h2 span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+header h2 .sep { color:var(--muted); font-weight:400; }
+.search { display:flex; align-items:center; gap:8px; height:38px; width:min(340px,38vw); padding:0 12px;
+  background:var(--field); border:1px solid var(--border); border-radius:8px; }
+.search input { flex:1; min-width:0; border:0; outline:0; background:transparent; }
+.tool { display:flex; align-items:center; gap:6px; height:36px; padding:0 10px; white-space:nowrap; }
+.tool:hover, .icon-btn:hover, nav .item:hover { background:var(--hover); }
+.tool:active, .icon-btn:active { background:var(--press); }
+.icon-btn { width:34px; height:34px; display:grid; place-items:center; flex:none; }
+.content { padding:20px 24px 40px; max-width:1100px; }
+.card { background:var(--card); border-radius:10px; box-shadow:var(--shadow); }
+.card + .card { margin-top:16px; }
+.row { display:flex; align-items:center; gap:16px; padding:16px 22px; cursor:pointer; }
+.row + .row { border-top:1px solid var(--border); }
+.row:hover { background:var(--hover); }
+.row .text { flex:1; min-width:0; }
+.row .name { font-size:15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.row .count { color:var(--muted); font-size:13px; margin-top:3px; }
+.row svg { color:var(--muted); }
+.avatar { width:30px; height:30px; flex:none; border-radius:7px; display:grid; place-items:center; overflow:hidden; }
+.avatar img { width:26px; height:26px; }
+.avatar.letter { color:#fff; font-weight:600; font-size:15px; }
+.account { padding:22px 26px 26px; }
+.account-head { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
+.account-head .title { flex:1; font-size:17px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.btn { height:34px; padding:0 16px; border:1px solid var(--border); background:var(--card); border-radius:6px;
+  box-shadow:0 1px 1px rgba(0,0,0,.04); }
+.btn:hover { background:var(--hover); }
+.btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-text); }
+.btn.primary:hover { filter:brightness(1.08); }
+.btn:disabled { opacity:.5; cursor:default; }
+.fields { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:26px 56px; }
+@media (max-width:760px) { .fields { grid-template-columns:minmax(0,1fr); } nav { width:200px; } }
+.field .label { margin:0 0 9px 2px; }
+.value { display:flex; align-items:center; gap:2px; min-height:44px; padding:0 6px 0 14px; background:var(--field); border-radius:6px; }
+.value .v { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; user-select:text; }
+.value .v.secret { letter-spacing:1px; }
+.value .v.none { color:var(--muted); }
+.edit-input { width:100%; height:42px; padding:0 12px; background:var(--field); border:1px solid var(--border); border-radius:6px; outline:0; }
+textarea.edit-input { height:84px; padding:10px 12px; resize:vertical; }
+.edit-input:focus { border-color:var(--accent); }
+.pw-wrap { position:relative; }
+.pw-wrap .icon-btn { position:absolute; right:4px; top:4px; }
+.pw-wrap input { padding-right:44px; }
+.span2 { grid-column:1 / -1; }
+.actions { display:flex; gap:8px; justify-content:flex-end; margin-top:22px; }
+.error { color:var(--danger); flex:1; align-self:center; }
+.notice { text-align:center; padding:56px 32px; }
+.notice svg { width:44px; height:44px; margin:0 auto 18px; color:var(--accent); stroke-width:1.2; }
+.notice h3 { margin:0 0 10px; font-size:18px; font-weight:600; }
+.notice p { margin:0 auto 22px; max-width:520px; color:var(--muted); line-height:1.5; }
+.notice .warn { color:var(--danger); }
+.menu { position:fixed; z-index:20; min-width:230px; padding:4px; background:var(--card); border-radius:8px;
+  box-shadow:0 0 0 1px var(--border), 0 8px 24px rgba(0,0,0,.18); }
+.menu button { display:flex; align-items:center; gap:10px; width:100%; height:36px; padding:0 12px; text-align:left; }
+.menu button:hover { background:var(--hover); }
+.menu .danger { color:var(--danger); }
+#toast { position:fixed; left:50%; bottom:28px; transform:translate(-50%,12px); opacity:0; pointer-events:none; z-index:30;
+  background:#2b2b2b; color:#fff; padding:10px 18px; border-radius:8px; box-shadow:0 6px 20px rgba(0,0,0,.25);
+  transition:opacity .15s, transform .15s; }
+#toast.on { opacity:1; transform:translate(-50%,0); }
+#toast.bad { background:#a4262c; }
+</style></head>
+<body>
+<nav aria-label='Settings'><h1>Settings</h1>
+  <button class='item' aria-current='page' data-section='passwords' data-icon='key'>Passwords</button>
+  <button class='item' data-section='privacy' data-icon='shield'>Privacy</button>
+</nav>
+<div id='main'></div>
+<div id='toast' role='status'></div>
+<script>
+'use strict';
+const ICONS = {
+  shield:'<svg viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.5 3.2 8.3 7.5 9.5 4.3-1.2 7.5-5 7.5-9.5V6L12 3Z"/><path d="m9 12 2 2 4-4"/></svg>',
+  key:'<svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5"/><path d="M11.2 11.8 20 3m-3.5 3.5 2.5 2.5m-5-1 2 2"/></svg>',
+  search:'<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>',
+  plus:'<svg viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></svg>',
+  more:'<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg>',
+  chevron:'<svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg>',
+  back:'<svg viewBox="0 0 24 24"><path d="M20 12H4m6-6-6 6 6 6"/></svg>',
+  copy:'<svg viewBox="0 0 24 24"><rect x="8" y="3" width="12" height="15" rx="2"/><path d="M5 7v12a2 2 0 0 0 2 2h9"/></svg>',
+  eye:'<svg viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>',
+  eyeOff:'<svg viewBox="0 0 24 24"><path d="M4 4l16 16M9.9 5.7A9.7 9.7 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3 3.8M6.4 7.3C3.9 9 2.5 12 2.5 12S6 18.5 12 18.5c1.6 0 3-.4 4.2-1.1M10 10a3 3 0 0 0 4 4"/></svg>',
+  open:'<svg viewBox="0 0 24 24"><path d="M14 4h6v6m0-6-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>',
+  lock:'<svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>',
+  upload:'<svg viewBox="0 0 24 24"><path d="M12 16V4m-5 5 5-5 5 5M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>',
+  trash:'<svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>'
+};
+const DOTS = '•'.repeat(12);
+const COLORS = ['#0f6cbd','#b4009e','#038387','#8764b8','#ca5010','#498205','#c50f1f','#00727a','#5c2e91','#986f0b'];
+let S = { mode:'loading', logins:[], attemptsLeft:10, maxAttempts:10 };
+const view = { section:'passwords', group:null, q:'', adding:false, editing:-1 };
+const clearChoice = { cookies:true, history:true, cache:false, autofill:false, hours:0 };
+let sites = null, siteQuery = '', fillSites = null; // Privacy: the sites with cookies (null until they arrive)
+const shown = {}, waiting = {}, hideTimers = {};
+const main = document.getElementById('main');
+
+// Builds elements; text always goes in as text (site names and notes come from imported files).
+function h(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  for (const k in props || {}) {
+    const v = props[k];
+    if (v === null || v === undefined || v === false) continue;
+    if (k === 'class') e.className = v;
+    else if (k === 'text') e.textContent = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat()) if (c !== null && c !== undefined && c !== false) e.append(c);
+  return e;
+}
+function icon(name) { const s = h('span'); s.innerHTML = ICONS[name]; return s.firstChild; }
+function iconButton(name, label, onclick) {
+  return h('button', { class:'icon-btn', title:label, 'aria-label':label, onclick }, icon(name));
+}
+function send(m) { window.chrome.webview.postMessage(m); }
+
+let toastTimer;
+function toast(text, bad) {
+  const t = document.getElementById('toast');
+  t.textContent = text;
+  t.className = 'on' + (bad ? ' bad' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ''; }, bad ? 4500 : 2500);
+}
+
+window.chrome.webview.addEventListener('message', e => {
+  const m = e.data;
+  if (m.type === 'state') {
+    S = m;
+    document.documentElement.classList.toggle('dark', !!m.dark);
+    for (const k in shown) delete shown[k];
+    view.adding = false; view.editing = -1;
+    if (m.mode !== 'open' || !m.logins.some(l => l.group === view.group)) view.group = null;
+    render(true);
+  } else if (m.type === 'password') {
+    const callbacks = waiting[m.id] || [];
+    delete waiting[m.id];
+    callbacks.forEach(cb => cb(m.value));
+  } else if (m.type === 'sites') {
+    sites = m.sites;
+    if (fillSites) fillSites();
+  } else if (m.type === 'toast') toast(m.text);
+  else if (m.type === 'result') {
+    document.querySelectorAll('.clear-now').forEach(b => b.disabled = false);
+    if (m.ok) toast(m.text);
+    else { toast(m.text, true); document.querySelectorAll('.save').forEach(b => b.disabled = false); }
+  }
+});
+
+function askPassword(id, cb) {
+  (waiting[id] = waiting[id] || []).push(cb);
+  if (waiting[id].length === 1) send({ cmd:'reveal', id });
+}
+
+function hash(s) { let x = 0; for (const c of s) x = (x * 31 + c.codePointAt(0)) >>> 0; return x; }
+function avatar(group, hasIcon) {
+  const box = h('span', { class:'avatar', 'aria-hidden':'true' });
+  const letter = () => {
+    box.textContent = (group.replace(/^www\./, '')[0] || '?').toUpperCase();
+    box.style.background = COLORS[hash(group) % COLORS.length];
+    box.classList.add('letter');
+  };
+  if (hasIcon) {
+    const img = h('img', { src:'icon/' + encodeURIComponent(group), alt:'' });
+    img.onerror = letter;
+    box.append(img);
+  } else letter();
+  return box;
+}
+
+function groups() {
+  const q = view.q.trim().toLowerCase(), map = new Map();
+  for (const l of S.logins) {
+    if (q && ![l.group, l.site, l.username, l.name].some(s => (s || '').toLowerCase().includes(q))) continue;
+    if (!map.has(l.group)) map.set(l.group, []);
+    map.get(l.group).push(l);
+  }
+  return [...map.entries()].sort((a, b) => a[0].toLowerCase() < b[0].toLowerCase() ? -1 : a[0].toLowerCase() > b[0].toLowerCase() ? 1 : 0);
+}
+
+function render(keepScroll) {
+  const top = main.scrollTop;
+  main.textContent = '';
+  if (view.section === 'privacy') main.append(privacyView());
+  else if (S.mode === 'loading') return;
+  else if (S.mode !== 'open') main.append(lockedView());
+  else if (view.group) main.append(groupView());
+  else main.append(listView());
+  if (keepScroll) main.scrollTop = top;
+}
+
+// Settings > Privacy: clear cookies (site sign-ins), history, cache and autofill, as Edge's Clear browsing data.
+function privacyView() {
+  const kinds = ['cookies', 'history', 'cache', 'autofill'];
+  const btn = h('button', { class:'btn primary clear-now', text:'Clear now', onclick: () => {
+    btn.disabled = true;
+    send({ cmd:'clear', cookies:clearChoice.cookies, history:clearChoice.history, cache:clearChoice.cache,
+      autofill:clearChoice.autofill, hours:clearChoice.hours });
+  } });
+  const sync = () => { btn.disabled = !kinds.some(k => clearChoice[k]); };
+  const option = (key, title, desc) => h('label', { class:'check' },
+    h('input', { type:'checkbox', 'data-kind':key, checked: clearChoice[key], onchange: e => { clearChoice[key] = e.target.checked; sync(); } }),
+    h('span', null, h('div', { class:'name', text:title }), h('div', { class:'count', text:desc })));
+  const ranges = [[1, 'Last hour'], [24, 'Last 24 hours'], [168, 'Last 7 days'], [672, 'Last 4 weeks'], [0, 'All time']];
+  const range = h('select', { class:'edit-input', id:'clear-range', onchange: e => { clearChoice.hours = +e.target.value; } },
+    ranges.map(([v, t]) => h('option', { value:String(v), text:t, selected: clearChoice.hours === v })));
+  sync();
+  return h('div', null,
+    h('header', null, h('h2', null, h('span', { text:'Privacy' }))),
+    h('div', { class:'content' }, h('div', { class:'card account' },
+      h('div', { class:'account-head' }, h('div', { class:'title', text:'Clear browsing data' })),
+      h('label', { class:'field', for:'clear-range' }, h('div', { class:'label', text:'Time range' })), range,
+      h('div', { class:'checks' },
+        option('cookies', 'Cookies and site sign-ins', 'Signs you out of most websites, in the browser and in saved web apps.'),
+        option('history', 'Browsing history', 'The pages you have visited and your download history.'),
+        option('cache', 'Cached images and files', 'Pages may load more slowly the next time you visit them.'),
+        option('autofill', 'Autofill form data', 'Entries the pages remembered for forms.')),
+      h('p', { class:'hint', text:'Your saved passwords in Passwords are kept. To remove them, use Erase all saved passwords there.' }),
+      h('div', { class:'actions' }, btn)),
+    siteCard()));
+}
+
+// One site only: its cookies and site storage (what keeps you signed in), subdomains included.
+function siteCard() {
+  const list = h('div', { class:'site-list' });
+  const clearSite = site => { send({ cmd:'clearSite', site }); };
+  fillSites = () => {
+    list.textContent = '';
+    if (sites === null) { list.append(h('p', { class:'hint', text:'Loading sites…' })); return; }
+    const q = siteQuery.trim().toLowerCase();
+    const shownSites = sites.filter(s => !q || s.site.toLowerCase().includes(q));
+    if (!shownSites.length) {
+      list.append(h('p', { class:'hint', text: sites.length ? 'No site with cookies matches. You can still clear the typed site.' : 'No sites have cookies.' }));
+      return;
+    }
+    list.append(h('div', { role:'list' }, shownSites.map(s =>
+      h('div', { class:'row site', role:'listitem' }, avatar(s.site, false),
+        h('div', { class:'text' }, h('div', { class:'name', text:s.site }),
+          h('div', { class:'count', text: s.cookies + (s.cookies === 1 ? ' cookie' : ' cookies') })),
+        h('button', { class:'btn', title:'Clear cookies and site data for ' + s.site, onclick: () => clearSite(s.site), text:'Clear' })))));
+  };
+  const input = h('input', { type:'search', id:'site-input', placeholder:'Search or type a site, e.g. example.com', 'aria-label':'Site', value:siteQuery,
+    oninput: e => { siteQuery = e.target.value; fillSites(); },
+    onkeydown: e => { if (e.key === 'Enter' && siteQuery.trim()) clearSite(siteQuery.trim()); } });
+  fillSites();
+  send({ cmd:'sites' });
+  return h('div', { class:'card account' },
+    h('div', { class:'account-head' }, h('div', { class:'title', text:'Clear data for one site' })),
+    h('div', { class:'site-search' }, h('label', { class:'search' }, icon('search'), input),
+      h('button', { class:'btn', id:'clear-typed', onclick: () => { if (siteQuery.trim()) clearSite(siteQuery.trim()); else input.focus(); }, text:'Clear this site' })),
+    h('p', { class:'hint', text:'Clears the site’s cookies and stored data, including its subdomains, which signs you out of it. ' +
+      'One site’s history and cached files can’t be cleared on their own: use Clear browsing data above for those.' }),
+    list);
+}
+
+function showSection(section) {
+  view.section = section;
+  view.group = null; view.adding = false; view.editing = -1;
+  document.querySelectorAll('nav .item').forEach(b => {
+    if (b.dataset.section === section) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
+  render();
+  main.scrollTop = 0;
+}
+
+function lockedView() {
+  const setup = S.mode === 'setup';
+  const left = S.attemptsLeft;
+  return h('div', null,
+    h('header', null, h('h2', null, h('span', { text:'Passwords' }))),
+    h('div', { class:'content' }, h('div', { class:'card notice' }, icon(setup ? 'key' : 'lock'),
+      h('h3', { text: setup ? 'Save your passwords behind a PIN' : 'Saved passwords are locked' }),
+      setup
+        ? h('p', null, 'Choose a 6-digit PIN to protect the passwords you import or add. ',
+            h('span', { class:'warn', text:'It can’t be recovered: if you forget it, the saved passwords are lost, and ' +
+              S.maxAttempts + ' wrong PINs in a row erase them for good.' }))
+        : h('p', { class: left < S.maxAttempts ? 'warn' : null, text: left < S.maxAttempts
+            ? left + (left === 1 ? ' attempt' : ' attempts') + ' left before your saved passwords are erased.'
+            : 'Enter your PIN to see, copy and edit them.' }),
+      h('button', { class:'btn primary', onclick: () => send({ cmd: setup ? 'setup' : 'unlock' }), text: setup ? 'Set a PIN' : 'Unlock' }))));
+}
+
+function listView() {
+  const box = h('div', { class:'content' });
+  const fill = () => {
+    box.textContent = '';
+    if (view.adding) box.append(editor(null));
+    const list = groups();
+    if (S.logins.length === 0 && !view.adding) {
+      box.append(h('div', { class:'card notice' }, icon('key'), h('h3', { text:'No saved passwords yet' }),
+        h('p', { text:'To bring them over from Microsoft Edge, open edge://settings/passwords, choose ⋯ › Export passwords, and import that file here.' }),
+        h('button', { class:'btn primary', onclick: () => send({ cmd:'import' }), text:'Import passwords' })));
+    } else if (list.length === 0 && view.q) {
+      box.append(h('div', { class:'card notice' }, h('p', { text:'No saved passwords match “' + view.q + '”.' })));
+    } else if (list.length) {
+      box.append(h('div', { class:'card', role:'list' }, list.map(([group, items]) =>
+        h('div', { class:'row group', role:'listitem', tabindex:'0', 'aria-label': group + ', ' + items.length + (items.length === 1 ? ' account' : ' accounts'),
+            onclick: () => openGroup(group), onkeydown: e => { if (e.key === 'Enter') openGroup(group); } },
+          avatar(group, items[0].icon),
+          h('div', { class:'text' }, h('div', { class:'name', text:group }),
+            h('div', { class:'count', text: items.length + (items.length === 1 ? ' account' : ' accounts') })),
+          icon('chevron')))));
+    }
+  };
+  const search = h('input', { type:'search', placeholder:'Search passwords', 'aria-label':'Search passwords', value:view.q,
+    oninput: e => { view.q = e.target.value; fill(); } });
+  const more = iconButton('more', 'More actions', e => showMenu(e.currentTarget));
+  const wrap = h('div', null,
+    h('header', null, h('h2', null, h('span', { text:'Passwords' })),
+      h('label', { class:'search' }, icon('search'), search),
+      h('button', { class:'tool', onclick: () => { view.adding = true; fill(); const f = box.querySelector('input'); if (f) f.focus(); } }, icon('plus'), 'Add'),
+      more),
+    box);
+  fill();
+  return wrap;
+}
+
+function openGroup(group) { view.group = group; view.editing = -1; render(); main.scrollTop = 0; }
+
+function groupView() {
+  const items = S.logins.filter(l => l.group === view.group);
+  const box = h('div', { class:'content' });
+  let site = '';
+  try { site = items[0] ? new URL(items[0].url).origin : ''; } catch (e) { }
+  if (view.adding) box.append(editor(null, site === 'null' ? '' : site));
+  for (const l of items) box.append(view.editing === l.id ? editor(l) : accountCard(l));
+  return h('div', null,
+    h('header', null,
+      iconButton('back', 'Back to all passwords', () => { view.group = null; view.adding = false; render(); }),
+      h('h2', null, h('span', { text:'Passwords' }), h('span', { class:'sep', text:'/' }), h('span', { text:view.group })),
+      h('button', { class:'tool', onclick: () => { view.adding = true; render(true); const f = main.querySelector('.content input'); if (f) f.focus(); } }, icon('plus'), 'Add')),
+    box);
+}
+
+function field(label, value, empty, buttons, cls) {
+  return h('div', { class:'field' }, h('div', { class:'label', text:label }),
+    h('div', { class:'value' }, h('span', { class:'v ' + (value ? (cls || '') : 'none'), text: value || empty, title: value || null }), buttons));
+}
+
+function accountCard(l) {
+  const pw = h('span', { class:'v secret', text: shown[l.id] || DOTS });
+  const eye = h('button', { class:'icon-btn', title:'Show password', 'aria-label':'Show password' }, icon('eye'));
+  const sync = () => {
+    const on = shown[l.id] !== undefined;
+    pw.textContent = on ? shown[l.id] : DOTS;
+    pw.classList.toggle('secret', !on);
+    eye.replaceChildren(icon(on ? 'eyeOff' : 'eye'));
+    eye.title = on ? 'Hide password' : 'Show password';
+    eye.setAttribute('aria-label', eye.title);
+  };
+  eye.onclick = () => {
+    if (shown[l.id] !== undefined) { delete shown[l.id]; sync(); return; }
+    askPassword(l.id, value => {
+      shown[l.id] = value; sync();
+      clearTimeout(hideTimers[l.id]);
+      hideTimers[l.id] = setTimeout(() => { delete shown[l.id]; sync(); }, 30000); // hides itself again
+    });
+  };
+  sync();
+  return h('div', { class:'card account' },
+    h('div', { class:'account-head' }, avatar(l.group, l.icon), h('div', { class:'title', text:l.site }),
+      h('button', { class:'btn', onclick: () => { view.editing = l.id; view.adding = false; render(true); }, text:'Edit' }),
+      h('button', { class:'btn', onclick: () => send({ cmd:'delete', id:l.id }), text:'Delete' })),
+    h('div', { class:'fields' },
+      field('Account name', l.username, 'No account name', l.username ? iconButton('copy', 'Copy account name', () => send({ cmd:'copy', id:l.id, field:'username' })) : null),
+      field('Site', l.url, '', iconButton('open', 'Open site', () => send({ cmd:'open', id:l.id }))),
+      h('div', { class:'field' }, h('div', { class:'label', text:'Password' }),
+        h('div', { class:'value' }, pw, eye, iconButton('copy', 'Copy password', () => send({ cmd:'copy', id:l.id, field:'password' })))),
+      field('Note', l.note, 'No note added')));
+}
+
+// Adding (l = null) or editing a saved password.
+function editor(l, site) {
+  const url = h('input', { class:'edit-input', value: l ? l.url : (site || ''), placeholder:'https://example.com', 'aria-label':'Site' });
+  const user = h('input', { class:'edit-input', value: l ? l.username : '', 'aria-label':'Account name', autocomplete:'off' });
+  const pass = h('input', { class:'edit-input', type:'password', 'aria-label':'Password', autocomplete:'new-password' });
+  const note = h('textarea', { class:'edit-input', 'aria-label':'Note' });
+  note.value = l ? l.note : '';
+  if (l) askPassword(l.id, v => { if (!pass.value) pass.value = v; });
+  const eye = iconButton('eye', 'Show password', () => {
+    const show = pass.type === 'password';
+    pass.type = show ? 'text' : 'password';
+    eye.replaceChildren(icon(show ? 'eyeOff' : 'eye'));
+  });
+  const error = h('div', { class:'error' });
+  const save = h('button', { class:'btn primary save', text:'Save' });
+  const cancel = () => { view.adding = false; view.editing = -1; render(true); };
+  save.onclick = () => {
+    if (!url.value.trim()) { error.textContent = 'Enter the site’s address.'; url.focus(); return; }
+    if (!pass.value) { error.textContent = 'Enter the password.'; pass.focus(); return; }
+    error.textContent = '';
+    save.disabled = true;
+    send({ cmd:'save', id: l ? l.id : -1, url:url.value, username:user.value, password:pass.value, note:note.value });
+  };
+  const card = h('div', { class:'card account', onkeydown: e => { if (e.key === 'Escape') cancel(); } },
+    h('div', { class:'account-head' }, h('div', { class:'title', text: l ? 'Edit password · ' + l.site : 'Add a password' })),
+    h('div', { class:'fields' },
+      h('label', { class:'field' }, h('div', { class:'label', text:'Account name' }), user),
+      h('label', { class:'field' }, h('div', { class:'label', text:'Site' }), url),
+      h('label', { class:'field' }, h('div', { class:'label', text:'Password' }), h('div', { class:'pw-wrap' }, pass, eye)),
+      h('label', { class:'field' }, h('div', { class:'label', text:'Note' }), note)),
+    h('div', { class:'actions' }, error, save, h('button', { class:'btn', onclick:cancel, text:'Cancel' })));
+  return card;
+}
+
+let menu = null, menuAnchor = null;
+function closeMenu() { if (menu) { menu.remove(); menu = null; } }
+function showMenu(anchor) {
+  if (menu) { closeMenu(); return; }
+  menuAnchor = anchor;
+  const r = anchor.getBoundingClientRect();
+  const item = (name, text, cmd, cls) => h('button', { class:cls || null, onclick: () => { closeMenu(); send({ cmd }); } }, icon(name), text);
+  menu = h('div', { class:'menu', role:'menu' },
+    item('upload', 'Import passwords (CSV)', 'import'),
+    item('lock', 'Lock saved passwords', 'lock'),
+    item('trash', 'Erase all saved passwords…', 'erase', 'danger'));
+  document.body.append(menu);
+  menu.style.top = (r.bottom + 4) + 'px';
+  menu.style.left = Math.max(8, r.right - menu.offsetWidth) + 'px';
+}
+document.addEventListener('mousedown', e => {
+  if (menu && !menu.contains(e.target) && !(menuAnchor && menuAnchor.contains(e.target))) closeMenu();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && menu) closeMenu();
+  else if (e.key === 'Escape' && view.group && view.editing < 0 && !view.adding) { view.group = null; render(); }
+});
+document.querySelectorAll('nav .item').forEach(b => {
+  b.prepend(icon(b.dataset.icon));
+  b.addEventListener('click', () => showSection(b.dataset.section));
+});
+send({ cmd:'ready' });
+</script></body></html>

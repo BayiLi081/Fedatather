@@ -51,7 +51,7 @@ namespace Fedatather
 
         CoreWebView2Controller controller;
         CoreWebView2 ui;
-        bool uiReady, autoScrolling;
+        bool uiReady, autoScrolling, closed;
         int scanId, imageSeq;
 
         public DevToolsLite(Form owner, CoreWebView2Environment env, CoreWebView2 page, Theme theme, float scale)
@@ -74,6 +74,10 @@ namespace Fedatather
         }
 
         int S(int px) { return (int)Math.Round(px * scale); }
+
+        // Split screen: when it follows a click into another pane, it appears without taking the focus from that page.
+        public bool OpenInBackground;
+        protected override bool ShowWithoutActivation { get { return OpenInBackground; } }
 
         // Beside a phone-size window if there is room, otherwise floating at the right of the screen.
         Rectangle PlaceBeside(Rectangle o)
@@ -116,6 +120,7 @@ namespace Fedatather
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            closed = true;
             scanId++; // stops a running scan
             autoScrolling = false;
             if (controller != null) { controller.Close(); controller = null; ui = null; }
@@ -137,12 +142,14 @@ namespace Fedatather
             try
             {
                 CoreWebView2Controller c = await env.CreateCoreWebView2ControllerAsync(Handle);
-                if (IsDisposed) { c.Close(); return; }
+                if (IsDisposed || closed) { c.Close(); return; }
                 controller = c;
             }
             catch (Exception ex)
             {
-                if (IsDisposed) return;
+                // Closed while the view was still being created (closing can complete this await before the window
+                // counts as disposed): nothing to report.
+                if (IsDisposed || closed) return;
                 MessageBox.Show(this, "Could not open DevTools Lite:\n\n" + ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Close();
                 return;
@@ -268,6 +275,15 @@ namespace Fedatather
             finally { gate.Release(); }
         }
 
+        // ExecuteScriptAsync can fail to ever complete (for example when a result can't be serialized). Give up
+        // after a while instead of leaving the scan lock held and every later scan waiting.
+        async Task<string> RunScript(string script)
+        {
+            Task<string> run = page.ExecuteScriptAsync(script);
+            if (await Task.WhenAny(run, Task.Delay(20000)) != run) throw new TimeoutException("The page script didn't finish.");
+            return await run;
+        }
+
         async Task<int[]> ScanOnce()
         {
             int id = scanId, newRows = 0, newImages = 0;
@@ -277,7 +293,10 @@ namespace Fedatather
             // Tables and repeated lists, read from the page's DOM.
             try
             {
-                string json = await page.ExecuteScriptAsync(TableScript);
+                string opened = await RunScript(ExpandScript);
+                if (id != scanId || IsDisposed) return null;
+                if (opened != "0" && opened != "null") await Task.Delay(500); // let expanded text render
+                string json = await RunScript(TableScript);
                 if (id != scanId || IsDisposed) return null;
                 List<object> found = Json.Parse(json) as List<object>;
                 if (found != null) newRows = MergeTables(found);
@@ -363,7 +382,9 @@ namespace Fedatather
                     c = new Collected();
                     c.Sig = sig;
                     c.Kind = kind;
-                    c.KeyHeader = kind == "list" ? PickKey(header, rows) : null;
+                    // The page's own item id when it has one (data-review-id...), else a unique link column.
+                    string key = Json.Str(t, "key");
+                    c.KeyHeader = kind != "list" ? null : key.Length > 0 && header.Contains(key) ? key : PickKey(header, rows);
                     collected.Add(c);
                 }
                 c.Caption = caption;
@@ -427,7 +448,7 @@ namespace Fedatather
             string best = null;
             for (int i = 0; i < header.Count; i++)
             {
-                if (!header[i].EndsWith(" link")) continue;
+                if (!Regex.IsMatch(header[i], @"(^|\s)link( \d+)?$")) continue;
                 HashSet<string> distinct = new HashSet<string>();
                 int filled = 0;
                 for (int r = 1; r < rows.Count; r++)
@@ -497,7 +518,7 @@ namespace Fedatather
                     bool atEnd = false, moved = true;
                     try
                     {
-                        Dictionary<string, object> s = Json.Parse(await page.ExecuteScriptAsync(ScrollScript)) as Dictionary<string, object>;
+                        Dictionary<string, object> s = Json.Parse(await RunScript(ScrollScript)) as Dictionary<string, object>;
                         object v;
                         if (s != null && s.TryGetValue("atEnd", out v) && v is bool) atEnd = (bool)v;
                         if (s != null && s.TryGetValue("moved", out v) && v is double) moved = (double)v > 0;
@@ -528,26 +549,7 @@ namespace Fedatather
             }
         }
 
-        const string ScrollScript = @"(function () {
-  var se = document.scrollingElement || document.documentElement, t = se;
-  if (se.scrollHeight - se.clientHeight < 50) {
-    var best = null, area = 0, all = document.body ? document.body.getElementsByTagName('*') : [];
-    for (var i = 0; i < all.length; i++) {
-      var el = all[i];
-      if (el.scrollHeight - el.clientHeight > 50 && el.clientHeight > 100) {
-        var oy = getComputedStyle(el).overflowY;
-        if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') {
-          var a = el.clientWidth * el.clientHeight;
-          if (a > area) { area = a; best = el; }
-        }
-      }
-    }
-    if (best) t = best;
-  }
-  var before = t.scrollTop;
-  t.scrollTo({ top: before + Math.round(t.clientHeight * 0.85), behavior: 'instant' });
-  return { moved: Math.round(t.scrollTop - before), atEnd: t.scrollTop + t.clientHeight >= t.scrollHeight - 4 };
-})()";
+        static readonly string ScrollScript = Embedded.Text("devtools-scroll.js");
 
         static void CollectImages(object node, List<string[]> found, HashSet<string> seen)
         {
@@ -570,165 +572,17 @@ namespace Fedatather
                 foreach (object child in (List<object>)v) CollectImages(child, found, seen);
         }
 
-        // 1. Real <table>s and 2. ARIA grids (skipping layout tables: < 2 rows / 2 columns, or wrapping other tables).
-        // 3. Repeated lists: post feeds, product grids, search results... A container whose children are many
-        //    look-alike items (same tag + class) becomes a table: one row per item, one column per repeated field
-        //    (text, link, image), headed by the field's class name.
-        const string TableScript = @"(function () {
-  function clean(s) { return (s || '').replace(/\s+/g, ' ').trim(); }
-  var out = [];
-  function add(caption, rows, kind, sig) {
-    var cols = 0, filled = 0;
-    rows.forEach(function (r) { cols = Math.max(cols, r.length); r.forEach(function (c) { if (c) filled++; }); });
-    if (rows.length < 2 || cols < 2 || filled < 4) return false;
-    out.push({ caption: caption, rows: rows, kind: kind || 'table', sig: sig || '' });
-    return true;
-  }
-  var tables = document.querySelectorAll('table');
-  for (var i = 0; i < tables.length && out.length < 100; i++) {
-    var t = tables[i];
-    if (t.querySelector('table')) continue;
-    var rows = [];
-    for (var r = 0; r < t.rows.length && r < 5000; r++) {
-      var row = [], cells = t.rows[r].cells;
-      for (var c = 0; c < cells.length; c++) {
-        row.push(clean(cells[c].innerText));
-        for (var k = 1; k < Math.min(cells[c].colSpan || 1, 50); k++) row.push('');
-      }
-      rows.push(row);
-    }
-    add(t.caption ? clean(t.caption.innerText) : clean(t.getAttribute('aria-label') || t.getAttribute('title')), rows);
-  }
-  var grids = document.querySelectorAll('[role=table], [role=grid], [role=treegrid]');
-  for (var g = 0; g < grids.length && out.length < 100; g++) {
-    var el = grids[g];
-    if (el.tagName === 'TABLE') continue;
-    var rws = el.querySelectorAll('[role=row]'), data = [];
-    for (var j = 0; j < rws.length && j < 5000; j++) {
-      var cs = rws[j].querySelectorAll('[role=cell], [role=gridcell], [role=columnheader], [role=rowheader]'), rr = [];
-      for (var q = 0; q < cs.length; q++) rr.push(clean(cs[q].innerText));
-      data.push(rr);
-    }
-    add(clean(el.getAttribute('aria-label')), data);
-  }
+        // 1. Real <table>s and 2. ARIA grids (skipping layout tables: < 2 rows / 2 filled columns, or wrapping
+        //    other tables).
+        // 3. Repeated lists: post feeds, reviews, product grids, search results... Look-alike siblings (same tag +
+        //    class) become a table: one row per item, one column per repeated field (text, link, image, rating),
+        //    named after the field's class name, or after what it holds when the class name is machine-made.
+        static readonly string TableScript = Embedded.Text("devtools-table.js");
 
-  // ---- 3. repeated lists
-  var SKIP = /^(script|style|svg|template|noscript|select|option|head|table|thead|tbody|tfoot|tr)$/i;
-  // class names generated by CSS-in-JS / CSS modules make poor column names
-  var HASHY = /^(css|sc|jsx|svelte|emotion)-|[_-](?=[A-Za-z]*\d)[A-Za-z0-9]{5,}$|^(?=[a-z]*\d)[a-z0-9]{6,}$|___[A-Za-z0-9_-]{4,}$/i;
-  function named(el) {
-    for (var i = 0; i < el.classList.length; i++) if (!HASHY.test(el.classList[i])) return el.classList[i];
-    return '';
-  }
-  function pretty(s) { return clean((s || '').replace(/[-_]+/g, ' ')); }
-  function shown(el) { return el.getClientRects().length > 0; }
-
-  var cands = [], all = document.body ? document.body.getElementsByTagName('*') : [];
-  for (var a = 0; a < all.length; a++) {
-    var p = all[a], kids = p.children;
-    if (kids.length < 3 || SKIP.test(p.tagName)) continue;
-    // already covered by tables, or site chrome (menus, headers, footers) rather than content
-    if (p.closest('table, [role=table], [role=grid], [role=treegrid], nav, header, footer, aside, ' +
-                  '[role=navigation], [role=banner], [role=contentinfo], [role=menu], [role=menubar], [role=tablist]')) continue;
-    var groups = {}, best = null;
-    for (var b = 0; b < kids.length; b++) {
-      var ch = kids[b];
-      if (SKIP.test(ch.tagName)) continue;
-      var sg = ch.tagName + '.' + (ch.classList[0] || '');
-      (groups[sg] = groups[sg] || []).push(ch);
-      if (!best || groups[sg].length > groups[best].length) best = sg;
-    }
-    var items = best ? groups[best].filter(shown) : [];
-    if (items.length < 3 || items.length > 3000) continue;
-    if (/^(P|BR|HR|H[1-6]|BLOCKQUOTE)$/.test(items[0].tagName)) continue;   // runs of prose, not records
-    var text = 0, links = 0, imgs = 0;
-    for (var d = 0; d < items.length; d++) {
-      var it = items[d];
-      text += Math.min((it.textContent || '').trim().length, 300);
-      if (it.tagName === 'A' || it.querySelector('a[href]')) links++;
-      if (it.tagName === 'IMG' || it.querySelector('img')) imgs++;
-    }
-    var n = items.length, avg = text / n;
-    if (avg < 4 && imgs < n / 2) continue;
-    cands.push({ el: p, items: items, score: n * (Math.min(avg, 120) / 4 + 10 * links / n + 10 * imgs / n) });
-  }
-  cands.sort(function (x, y) { return y.score - x.score; });
-
-  function listRows(items) {
-    var order = [], cols = {}, data = [];
-    items.forEach(function (item) {
-      var rec = {};
-      function put(key, v, label) {
-        v = clean(v);
-        if (!v || v.length > 2000 || rec[key] !== undefined) return;
-        rec[key] = v;
-        if (!cols[key]) { cols[key] = { n: 0, label: label }; order.push(key); }
-        cols[key].n++;
-      }
-      function visit(el, key, label) {
-        var t = el.tagName;
-        if (t === 'IMG') { put(key + '@img', el.currentSrc || el.src, pretty(label || 'image') + ' image'); return; }
-        if (t === 'A' && el.href && !/^javascript:/i.test(el.href)) put(key + '@link', el.href, pretty(label || 'link') + ' link');
-        if (el.children.length === 0) { put(key, el.innerText || el.textContent, pretty(label || t.toLowerCase())); return; }
-        var own = '';
-        for (var i = 0; i < el.childNodes.length; i++) if (el.childNodes[i].nodeType === 3) own += el.childNodes[i].nodeValue;
-        put(key + '@text', own, pretty(label || t.toLowerCase()));
-        var seen = {};
-        for (var j = 0; j < el.children.length; j++) {
-          var c = el.children[j];
-          if (SKIP.test(c.tagName)) continue;
-          var seg = c.tagName + '.' + (c.classList[0] || '');
-          seen[seg] = (seen[seg] || 0) + 1;
-          visit(c, key + '>' + seg + '#' + seen[seg], named(c) || label);
-        }
-      }
-      visit(item, '', named(item));
-      data.push(rec);
-    });
-
-    var n = data.length, min = Math.max(2, Math.ceil(n * 0.25)), kept = [], same = {};
-    order.forEach(function (k) {
-      if (cols[k].n < min) return;
-      var vals = data.map(function (r) { return r[k] || ''; }), distinct = {}, count = 0;
-      vals.forEach(function (v) { if (!distinct[v]) { distinct[v] = 1; count++; } });
-      if (count < 2) return;                       // identical everywhere: icons, fixed labels
-      var whole = vals.join('|~|');
-      if (same[whole]) return;                     // duplicate of an earlier column (same link twice)
-      same[whole] = 1;
-      kept.push(k);
-    });
-    if (kept.length < 2) return null;
-    // readable text first (title, name, count...), then links, then images
-    function rank(k) { return /@link$/.test(k) ? 1 : /@img$/.test(k) ? 2 : 0; }
-    kept = kept.map(function (k, i) { return { k: k, i: i }; })
-      .sort(function (x, y) { return rank(x.k) - rank(y.k) || x.i - y.i; })
-      .map(function (o) { return o.k; })
-      .slice(0, 20);
-    var used = {}, header = kept.map(function (k) {
-      var h = cols[k].label || 'field';
-      used[h] = (used[h] || 0) + 1;
-      return used[h] > 1 ? h + ' ' + used[h] : h;
-    });
-    return [header].concat(data.map(function (r) { return kept.map(function (k) { return r[k] || ''; }); }));
-  }
-
-  var chosen = [];
-  for (var e = 0; e < cands.length && chosen.length < 3; e++) {
-    var cd = cands[e];
-    if (chosen.some(function (o) { return o.contains(cd.el) || cd.el.contains(o); })) continue;
-    var rows = listRows(cd.items.slice(0, 1000));
-    if (!rows) continue;
-    var label = clean(cd.el.getAttribute('aria-label'));
-    var prev = cd.el.previousElementSibling;
-    if (!label && prev && /^H[1-6]$/.test(prev.tagName)) label = clean(prev.textContent);
-    var first = cd.items[0], what = pretty(named(first) || first.tagName.toLowerCase());
-    // identifies the same list across scans, so rows found later are appended to it
-    var sig = 'list:' + cd.el.tagName + '.' + (cd.el.classList[0] || '') + '#' + (cd.el.id || '') +
-              '>' + first.tagName + '.' + (first.classList[0] || '');
-    if (add((label ? label + ' - ' : '') + what + ' list', rows, 'list', sig)) chosen.push(cd.el);
-  }
-  return out;
-})()";
+        // Reviews and posts often cut long text short behind a "More" button. Before reading the page, expand
+        // those: only buttons that declare themselves collapsed in-place disclosures (aria-expanded=false, no
+        // popup) labelled More / See more / Read more / 展开... Links are never clicked, so this can't navigate.
+        static readonly string ExpandScript = Embedded.Text("devtools-expand.js");
 
         // ---------------------------------------------------------------- saving
         //
@@ -924,219 +778,6 @@ namespace Fedatather
 
         // ---------------------------------------------------------------- panel UI (served as https://devtools.lite/)
 
-        const string PanelHtml = @"<!doctype html>
-<html><head><meta charset='utf-8'><meta name='color-scheme' content='light dark'><title>DevTools Lite</title>
-<style>
-:root { --bg:#ffffff; --panel:#f3f3f3; --line:#dedede; --fg:#1b1b1b; --muted:#666666; --accent:#0067c0; --accent-fg:#ffffff; --card:#fafafa; --sel:rgba(0,103,192,.10); }
-@media (prefers-color-scheme: dark) { :root { --bg:#1b1b1b; --panel:#202020; --line:#333333; --fg:#e6e6e6; --muted:#9c9c9c; --accent:#4cc2ff; --accent-fg:#0b0b0b; --card:#262626; --sel:rgba(76,194,255,.14); } }
-* { box-sizing:border-box; }
-html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:13px 'Segoe UI', system-ui, sans-serif; user-select:none; }
-body { display:flex; flex-direction:column; }
-header, .bar, footer { background:var(--panel); display:flex; align-items:center; gap:8px; padding:8px 10px; }
-header { border-bottom:1px solid var(--line); }
-.bar { color:var(--muted); border-bottom:1px solid var(--line); padding:6px 10px; min-height:34px; }
-footer { border-top:1px solid var(--line); flex-wrap:wrap; }
-.tab { border:0; background:transparent; color:var(--muted); font:inherit; font-weight:600; padding:6px 10px; border-radius:6px; cursor:pointer; }
-.tab.on { color:var(--fg); background:var(--bg); }
-.tab .n { font-weight:400; margin-left:6px; color:var(--muted); }
-.grow { flex:1; }
-button.ghost { border:1px solid var(--line); background:var(--bg); color:var(--fg); border-radius:6px; padding:5px 10px; font:inherit; cursor:pointer; white-space:nowrap; }
-button.ghost:hover { border-color:var(--muted); }
-button.ghost.active { background:var(--accent); color:var(--accent-fg); border-color:var(--accent); }
-header { flex-wrap:wrap; }
-button.primary { border:0; background:var(--accent); color:var(--accent-fg); border-radius:6px; padding:8px 16px; font:inherit; font-weight:600; cursor:pointer; white-space:nowrap; }
-button:disabled { opacity:.45; cursor:default; }
-label { display:flex; align-items:center; gap:6px; cursor:pointer; white-space:nowrap; }
-input[type=checkbox] { accent-color:var(--accent); width:15px; height:15px; margin:0; }
-#status { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
-main { flex:1; overflow:auto; padding:10px; }
-.grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(118px, 1fr)); gap:8px; }
-.card { position:relative; background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; cursor:pointer; }
-.card.sel { border-color:var(--accent); background:var(--sel); }
-.card input { position:absolute; top:6px; left:6px; z-index:1; }
-.thumb { height:104px; display:flex; align-items:center; justify-content:center; padding:6px;
-  background-image:conic-gradient(rgba(128,128,128,.14) 25%, transparent 0 50%, rgba(128,128,128,.14) 0 75%, transparent 0); background-size:14px 14px; }
-.thumb img { max-width:100%; max-height:100%; object-fit:contain; }
-.meta { padding:5px 7px; font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.tcard { background:var(--card); border:1px solid var(--line); border-radius:8px; margin-bottom:8px; overflow:hidden; }
-.tcard.sel { border-color:var(--accent); }
-.tcard .head { display:flex; align-items:center; gap:8px; padding:8px 10px; cursor:pointer; }
-.tcard.sel .head { background:var(--sel); }
-.tcard .title { flex:1; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.tcard .dims { color:var(--muted); font-size:12px; white-space:nowrap; }
-.tcard .badge { font-size:11px; font-weight:600; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:0 5px; }
-.preview { overflow:auto; max-height:150px; border-top:1px solid var(--line); }
-.preview table { border-collapse:collapse; font-size:11px; }
-.preview td { border:1px solid var(--line); padding:3px 6px; white-space:nowrap; max-width:160px; overflow:hidden; text-overflow:ellipsis; }
-.preview tr:first-child td { font-weight:600; }
-.folder { display:flex; align-items:center; gap:6px; flex:1 1 100%; min-width:0; }
-.folder .lbl { color:var(--muted); white-space:nowrap; }
-.folder .path { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-#empty { color:var(--muted); text-align:center; padding:48px 16px; }
-.hidden { display:none !important; }
-</style></head>
-<body>
-<header>
-  <button class='tab on' data-tab='images'>Images<span class='n' id='nImages'>0</span></button>
-  <button class='tab' data-tab='tables'>Tables<span class='n' id='nTables'>0</span></button>
-  <span class='grow'></span>
-  <button class='ghost' id='refresh' title='Scan again and add anything new to what is collected (F5)'>Rescan</button>
-  <button class='ghost' id='auto' title='Scroll the page down step by step and keep collecting'>Auto-scroll</button>
-  <button class='ghost' id='clear' title='Forget everything collected and start over'>Clear</button>
-</header>
-<div class='bar'>
-  <label><input type='checkbox' id='all' checked> All</label>
-  <label id='smallOpt' title='Hide icons, spacers and tracking pixels'><input type='checkbox' id='hideSmall' checked> Hide small (&lt; 64 px)</label>
-  <span class='grow'></span>
-  <span id='status'></span>
-</div>
-<main>
-  <div id='images' class='grid'></div>
-  <div id='tables' class='hidden'></div>
-  <div id='empty' class='hidden'></div>
-</main>
-<footer>
-  <div class='folder'><span class='lbl'>Save to</span><span class='path' id='path'></span></div>
-  <button class='ghost' id='change' title='Choose the folder; each collection gets its own subfolder in it'>Change&hellip;</button>
-  <button class='ghost' id='open' title='Open this collection&#39;s folder'>Open</button>
-  <span class='grow'></span>
-  <button class='primary' id='save'>Save</button>
-</footer>
-<script>
-(function () {
-  var tab = 'images', folders = { images: '', tables: '' }, images = [], tables = [], scanning = true, saving = false, autoOn = false;
-  var session = ''; // this collection's subfolder: '<site> <date time>'
-  // keep the end of a long path visible: ...\Fedatather\xiaohongshu.com 2026-11-10 12-45
-  function shortPath(p) { var parts = p.split('\\'); return parts.length > 3 ? '…\\' + parts.slice(-2).join('\\') : p; }
-  function $(id) { return document.getElementById(id); }
-  function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e; }
-  function post(o) { window.chrome.webview.postMessage(o); }
-  function bytes(n) { return n < 1024 ? n + ' B' : n < 1048576 ? Math.round(n / 1024) + ' KB' : (n / 1048576).toFixed(1) + ' MB'; }
-  function type(mime) {
-    var m = /^image\/([a-z0-9.+-]+)/i.exec(mime || ''), k = m ? m[1].toLowerCase() : 'file';
-    return k === 'svg+xml' ? 'svg' : k === 'jpeg' ? 'jpg' : (k === 'x-icon' || k === 'vnd.microsoft.icon') ? 'ico' : k;
-  }
-  function shown(it) { return !(it.kind === 'images' && $('hideSmall').checked && it.small); }
-  function list() { return tab === 'images' ? images : tables; }
-  function select(it, on) { it.sel = on; it.cb.checked = on; it.card.classList.toggle('sel', on); }
-  function clickable(it, target) {
-    target.addEventListener('click', function (e) { select(it, e.target === it.cb ? it.cb.checked : !it.sel); update(); });
-  }
-
-  function addImage(m) {
-    var it = { kind: 'images', id: m.id, sel: true, small: false };
-    var card = el('div', 'card sel'), cb = el('input'), th = el('div', 'thumb'), img = el('img'), meta = el('div', 'meta');
-    var info = type(m.mime) + ' · ' + bytes(m.size);
-    cb.type = 'checkbox'; cb.checked = true;
-    card.title = m.name + '\n' + m.url;
-    meta.textContent = info;
-    img.onload = function () {
-      var w = img.naturalWidth, h = img.naturalHeight;
-      if (w && h) { meta.textContent = w + '×' + h + ' · ' + info; it.small = w < 64 || h < 64; update(); }
-    };
-    img.src = 'img/' + encodeURIComponent(m.id);
-    th.appendChild(img); card.appendChild(cb); card.appendChild(th); card.appendChild(meta);
-    it.card = card; it.cb = cb; clickable(it, card);
-    images.push(it); $('images').appendChild(card);
-  }
-
-  // Tables keep growing between scans; ticks are remembered by table id until the page is cleared.
-  var tableSel = {};
-  function setTables(arr) {
-    tables.forEach(function (it) { tableSel[it.id] = it.sel; });
-    tables = []; $('tables').textContent = '';
-    var listSeen = false;
-    (arr || []).forEach(function (t, i) {
-      var rows = t.preview || [], cols = t.cols || 0, total = t.total || 0;
-      // default: tick every real table but only the best list (lists arrive best first)
-      var isList = t.kind === 'list', on = tableSel.hasOwnProperty(t.id) ? tableSel[t.id] : (!isList || !listSeen);
-      if (isList) listSeen = true;
-      var it = { kind: 'tables', id: t.id, sel: on };
-      var card = el('div', on ? 'tcard sel' : 'tcard'), head = el('div', 'head'), cb = el('input'), title = el('div', 'title'), dims = el('div', 'dims');
-      cb.type = 'checkbox'; cb.checked = on;
-      var badge = el('span', 'badge');
-      badge.textContent = isList ? 'List' : 'Table';
-      title.textContent = t.caption || ('Table ' + (i + 1));
-      dims.textContent = isList ? total + ' items × ' + cols + ' fields' : total + ' rows × ' + cols + ' cols';
-      head.appendChild(cb); head.appendChild(badge); head.appendChild(title); head.appendChild(dims);
-      var pv = el('div', 'preview'), tb = el('table');
-      rows.slice(0, 6).forEach(function (r) {
-        var tr = el('tr');
-        r.slice(0, 8).forEach(function (c) { var td = el('td'); td.textContent = c; td.title = c; tr.appendChild(td); });
-        tb.appendChild(tr);
-      });
-      pv.appendChild(tb); card.appendChild(head); card.appendChild(pv);
-      it.card = card; it.cb = cb; clickable(it, head);
-      tables.push(it); $('tables').appendChild(card);
-    });
-  }
-
-  function update() {
-    var vis = 0, sel = 0;
-    images.forEach(function (it) { it.card.classList.toggle('hidden', !shown(it)); });
-    list().forEach(function (it) { if (shown(it)) { vis++; if (it.sel) sel++; } });
-    $('nImages').textContent = images.filter(shown).length;
-    $('nTables').textContent = tables.length;
-    var tabs = document.querySelectorAll('.tab');
-    for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('on', tabs[i].getAttribute('data-tab') === tab);
-    $('images').classList.toggle('hidden', tab !== 'images');
-    $('tables').classList.toggle('hidden', tab !== 'tables');
-    $('smallOpt').classList.toggle('hidden', tab !== 'images');
-    $('all').checked = vis > 0 && sel === vis;
-    $('all').disabled = vis === 0;
-    var noun = tab === 'images' ? (sel === 1 ? 'image' : 'images') : (sel === 1 ? 'table' : 'tables');
-    $('save').textContent = 'Save ' + sel + ' ' + noun;
-    $('save').disabled = sel === 0 || saving;
-    $('empty').textContent = scanning ? 'Scanning the page…'
-      : tab === 'images' ? 'No images found. Scroll the page to load more, then Rescan.' : 'No tables or repeated lists found on this page.';
-    $('empty').classList.toggle('hidden', vis > 0);
-    var full = folders[tab] ? folders[tab] + (session ? '\\' + session : '') : '';
-    $('path').textContent = shortPath(full);
-    $('path').title = full;
-  }
-
-  var tabBtns = document.querySelectorAll('.tab');
-  for (var i = 0; i < tabBtns.length; i++) {
-    tabBtns[i].onclick = function () { tab = this.getAttribute('data-tab'); $('status').textContent = ''; update(); };
-  }
-  $('hideSmall').onchange = update;
-  $('all').onchange = function () { var on = this.checked; list().forEach(function (it) { if (shown(it)) select(it, on); }); update(); };
-  $('refresh').onclick = function () { post({ cmd: 'refresh' }); };
-  $('auto').onclick = function () { post({ cmd: 'auto' }); };
-  $('clear').onclick = function () { post({ cmd: 'clear' }); };
-  $('change').onclick = function () { post({ cmd: 'pick', kind: tab }); };
-  $('open').onclick = function () { post({ cmd: 'open', kind: tab }); };
-  $('save').onclick = function () {
-    var ids = list().filter(function (it) { return shown(it) && it.sel; }).map(function (it) { return String(it.id); });
-    if (!ids.length) return;
-    saving = true; $('status').textContent = 'Saving…'; update();
-    post({ cmd: 'save', kind: tab, ids: ids });
-  };
-  document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
-
-  window.chrome.webview.addEventListener('message', function (e) {
-    var m = e.data;
-    switch (m.type) {
-      case 'init': folders = m.folders; break;
-      case 'reset': images = []; tables = []; tableSel = {}; $('images').textContent = ''; $('tables').textContent = ''; scanning = true; break;
-      case 'scan': scanning = true; if (!autoOn) $('status').textContent = 'Scanning…'; break;
-      case 'auto': autoOn = m.on; $('auto').textContent = m.on ? 'Stop' : 'Auto-scroll'; $('auto').classList.toggle('active', m.on); break;
-      case 'status': $('status').textContent = m.message; $('status').title = m.message; break;
-      case 'tables': setTables(m.tables); break;
-      case 'image': addImage(m); break;
-      case 'progress': if (!autoOn) $('status').textContent = 'Scanning… ' + m.done + ' / ' + m.total; break;
-      case 'done': scanning = false; if (!autoOn) { $('status').textContent = m.message || ''; $('status').title = m.message || ''; } break;
-      case 'folder': folders[m.kind] = m.path; break;
-      case 'session': session = m.name; break;
-      case 'saved': saving = false; $('status').textContent = m.message; $('status').title = m.message; break;
-    }
-    update();
-  });
-
-  update();
-  post({ cmd: 'ready' });
-})();
-</script>
-</body></html>";
+        static readonly string PanelHtml = Embedded.Text("devtools.html");
     }
 }

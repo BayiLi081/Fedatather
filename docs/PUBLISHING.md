@@ -7,7 +7,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -PublicRelease
 powershell -ExecutionPolicy Bypass -File .\tests\run.ps1
 ```
 
-To regenerate the README screenshots, run `powershell -ExecutionPolicy Bypass -File .\tools\CaptureScreenshots.ps1`. This temporarily shows the actual browser with an isolated profile and local fictional pages. It captures only the app windows, never the desktop. `demo.fedatather.test` maps locally to `docs/demo`; it is not a public service.
+To regenerate the README screenshots, run `powershell -ExecutionPolicy Bypass -File .\tools\CaptureScreenshots.ps1`. This temporarily shows the actual browser with an isolated profile and local fictional pages. It captures only the app windows, never the desktop. `demo.fedatather.test` maps locally to `docs/demo`; it is not a public service. It takes the 15 screenshots used in the README's Quick tour. For the terminal shot it replaces the PowerShell prompt and turns off PSReadLine, so no user name, folder or command history appears; saved-app windows it opens never hand links to the default browser. Look through the images before publishing anyway.
 
 To audit and package the public source, use Python 3:
 

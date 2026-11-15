@@ -16,7 +16,7 @@ namespace Fedatather
     {
         // Phone window size in actual screen pixels, toolbar included (not scaled with DPI).
         const int PhoneWindowWidth = 500;
-        const int PhoneWindowHeight = 750;
+        const int PhoneWindowHeight = 900; // 750 + 20%
         const int BarHeight = 36;        // navigation row
         const int TitleRowHeight = 30;   // extra top row in phone size: title + window buttons, free to drag
         const int TitleButtonHeight = 24;
@@ -27,6 +27,7 @@ namespace Fedatather
         const string SearchUrl = "https://www.google.com/search?q=";
 
         readonly LaunchOptions options;
+        Action<string> openExternalLink = delegate(string url) { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); };
         readonly bool fixedSize;      // web app saved with a fixed window size: no size switching
         readonly string windowName;
         readonly float scale;
@@ -35,8 +36,13 @@ namespace Fedatather
         readonly ToolTip tips = new ToolTip();
         readonly ToolBar bar;
         readonly AddressBox address;
-        readonly IconButton backBtn, fwdBtn, reloadBtn, devBtn, modeBtn, pinBtn, minBtn, closeBtn, bossBtn;
+        readonly IconButton backBtn, fwdBtn, reloadBtn, devBtn, splitBtn, settingsBtn, modeBtn, pinBtn, minBtn, closeBtn, bossBtn;
+        SettingsForm settingsWindow;
+        bool restoreSettings;
         readonly Panel host;
+        readonly TerminalPanel terminal;
+        readonly TerminalLauncher termFab;
+        readonly PasswordManager passwords;
         readonly string startUrl;
         readonly Panel tabBar;
         readonly FlowLayoutPanel tabButtons;
@@ -45,21 +51,37 @@ namespace Fedatather
         readonly SemaphoreSlim tabGate = new SemaphoreSlim(1, 1);
         readonly FoldedTabs folded;
         BrowserTab activeTab;
-        bool closing, bossMode, restoreDevTools;
+        bool closing, bossMode, restoreDevTools, terminalOpen, restoreTerminalFocus;
         readonly PictureBox bossCover;
+
+        // Split screen: three panes side by side in full screen, two stacked top and bottom in phone size.
+        // A pane shows a tab or is empty. activeTab is the tab in the current pane, so it is null while an empty
+        // pane is current. A dual web app is a phone window that is always split.
+        const int MaxPanes = 3;
+        int PaneCount { get { return phoneMode ? 2 : 3; } }
+        bool splitMode;
+        readonly BrowserTab[] panes = new BrowserTab[MaxPanes];
+        int currentPane;
+        readonly PaneHeader[] paneHeaders = new PaneHeader[MaxPanes];
+        readonly EmptyPane[] emptyPanes = new EmptyPane[MaxPanes];
+        Rectangle markedPane;  // the current pane's column: its frame is drawn red
 
         sealed class BrowserTab
         {
             public CoreWebView2Controller Controller;
             public CoreWebView2 Web;
             public string Url, Title;
-            public bool Loading;
+            public bool Loading, InitialNavigationComplete;
+            public DevToolsLite Tools; // this page's DevTools Lite, shown while the page is the current one
+            public CoreWebView2MemoryUsageTargetLevel MemoryLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
         }
 
         CoreWebView2Environment env;
         CoreWebView2Controller controller;
         CoreWebView2 web;
-        DevToolsLite devTools;
+        DevToolsLite devTools;         // the one on screen: the current page's
+        bool toolsOn, toolsClosingQuietly;
+        Rectangle toolsBounds;         // where DevTools Lite was last, so a pane's own one opens in the same place
         bool phoneMode, pinned, loading, htmlFullscreen, shown, saveDialogOpen;
         bool webHadFocus = true, selectAllOnMouseUp, dragArmed;
         Point dragStart;
@@ -97,7 +119,27 @@ namespace Fedatather
             host = new Panel();
             host.Dock = DockStyle.Fill;
             host.BackColor = theme.Page;
-            host.Resize += delegate { foreach (BrowserTab tab in tabs) tab.Controller.Bounds = host.ClientRectangle; };
+            host.Resize += delegate { LayoutViews(); };
+            // Only the frame around the current pane's page shows: the page and header cover the rest.
+            host.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                if (markedPane.IsEmpty) return;
+                using (SolidBrush b = new SolidBrush(theme.Target)) e.Graphics.FillRectangle(b, markedPane);
+            };
+            for (int i = 0; i < MaxPanes; i++)
+            {
+                int pane = i;
+                PaneHeader header = new PaneHeader(theme, scale) { Number = i + 1, Visible = false };
+                header.Click += delegate { FocusPane(pane, true); };
+                header.CloseButton.Click += delegate { ClearPane(pane); };
+                SetTip(header.CloseButton, "Empty this pane (the tab stays open)");
+                EmptyPane empty = new EmptyPane(theme, scale) { Visible = false };
+                empty.Click += delegate { FocusPane(pane, true); };
+                paneHeaders[i] = header;
+                emptyPanes[i] = empty;
+                host.Controls.Add(header);
+                host.Controls.Add(empty);
+            }
 
             bar = new ToolBar(theme);
             bar.Dock = DockStyle.Top;
@@ -113,6 +155,9 @@ namespace Fedatather
             reloadBtn = AddButton(Icons.Refresh, "Reload (F5)", delegate { ReloadOrStop(); });
             bossBtn = AddButton(Icons.Person, "Boss mode (Ctrl+Shift+B)", delegate { ToggleBossMode(); });
             devBtn = AddButton(Icons.DevTools, "DevTools Lite: save images & tables (F12)", delegate { ToggleDevTools(); });
+            settingsBtn = AddButton(Icons.Settings, "Settings (Ctrl+,)", delegate { ShowSettings(); });
+            splitBtn = AddButton("", SplitTip(), delegate { ToggleSplit(); });
+            splitBtn.Glyph = Icons.DrawSplit;
             modeBtn = AddButton(Icons.FullScreen, "", delegate { ToggleMode(); });
             pinBtn = AddButton(Icons.Pin, "", delegate { ApplyPin(!pinned); });
             minBtn = AddButton(Icons.Minimize, "Minimize", delegate { WindowState = FormWindowState.Minimized; });
@@ -141,7 +186,14 @@ namespace Fedatather
             address.Box.Text = startUrl;
             bar.Controls.Add(address);
 
-            tabBar = new Panel { Dock = DockStyle.Top, Height = S(32), BackColor = theme.TabBar };
+            // Saved passwords live next to the browser data and are shared with saved web apps, like logins.
+            passwords = new PasswordManager(Path.Combine(Program.DataDir, "passwords.dat"), theme, scale);
+            passwords.BossKey = delegate { if (!bossMode) ToggleBossMode(); };
+            passwords.SitesUpdated += delegate { UpdateKeyButton(); };
+            address.KeyButton.Click += delegate { ShowPasswordMenu(); };
+            SetTip(address.KeyButton, "Fill a saved password for this site (Ctrl+Shift+K)");
+
+            tabBar = new Panel { Dock = DockStyle.Top, Height = S(32), BackColor = theme.TabBar, Visible = !options.IsApp };
             foldedButton = new Button { Dock = DockStyle.Right, Width = S(108), FlatStyle = FlatStyle.Flat,
                 ForeColor = theme.Muted, BackColor = theme.TabBar, Text = "Folded tabs" };
             foldedButton.FlatAppearance.BorderSize = 0;
@@ -162,6 +214,27 @@ namespace Fedatather
             tabBar.Controls.Add(foldedButton);
             UpdateTabs();
 
+            // The terminal floats over the page: a round button in the bottom-right corner unfolds into its window.
+            terminal = new TerminalPanel(theme, scale, SetTip) { Visible = false };
+            string[] place = settings.Get("terminal", "").Split(',');
+            int tw, th, tx, ty;
+            if (place.Length == 4 && int.TryParse(place[0], out tw) && int.TryParse(place[1], out th) &&
+                int.TryParse(place[2], out tx) && int.TryParse(place[3], out ty))
+            {
+                terminal.RestoreSize = new Size(tw, th);
+                terminal.Offset = new Point(tx, ty);
+            }
+            terminal.Area = delegate { return host.Bounds; };
+            termFab = new TerminalLauncher(theme, scale);
+            SetTip(termFab, "Terminal (Ctrl+`)");
+            termFab.Click += delegate { ShowTerminal(); };
+            host.SizeChanged += delegate { LayoutFloating(); };
+            host.LocationChanged += delegate { LayoutFloating(); };
+            terminal.HideButton.Click += delegate { HideTerminal(); };
+            terminal.KillButton.Click += delegate { terminal.View.Stop(); HideTerminal(); };
+            terminal.View.ShellExited += delegate { HideTerminal(); };
+            terminal.View.GotFocus += delegate { webHadFocus = false; };
+
             // Docking runs from the end of the collection: bar claims the top, host fills the rest.
             Controls.Add(host);
             Controls.Add(tabBar);
@@ -170,6 +243,11 @@ namespace Fedatather
                 BackColor = Color.White, Visible = false, TabStop = false };
             bossCover.Resize += delegate { LayoutBossButton(); };
             Controls.Add(bossCover);
+            // Not docked: they float above the page (in front of it in the z-order).
+            Controls.Add(termFab);
+            Controls.Add(terminal);
+            termFab.BringToFront();
+            terminal.BringToFront();
             LayoutBar();
         }
 
@@ -206,7 +284,7 @@ namespace Fedatather
         int BarHeightFor(bool phone) { return S(phone ? TitleRowHeight + BarHeight : BarHeight); }
 
         // Full screen: one row.  Phone size: two rows —
-        //   [ page title ..... (drag anywhere) .....  devtools  size  pin | min  close ]
+        //   [ page title ..... (drag anywhere) .....  boss  terminal  devtools  size  pin  settings | min  close ]
         //   [ back  fwd  reload  [ address ........................... ] ]
         void LayoutBar()
         {
@@ -221,8 +299,11 @@ namespace Fedatather
             closeBtn.SetBounds(r -= bw, winY, bw, winH);
             minBtn.SetBounds(r -= bw, winY, bw, winH);
             r -= pad;
+            settingsBtn.SetBounds(r -= bw, winY, bw, winH);
             pinBtn.SetBounds(r -= bw, winY, bw, winH);
             if (!fixedSize) modeBtn.SetBounds(r -= bw, winY, bw, winH);
+            splitBtn.Visible = !options.IsApp;
+            if (splitBtn.Visible) splitBtn.SetBounds(r -= bw, winY, bw, winH);
             devBtn.SetBounds(r -= bw, winY, bw, winH);
             if (!bossMode) bossBtn.SetBounds(r -= bw, winY, bw, winH);
 
@@ -279,6 +360,8 @@ namespace Fedatather
             if (!fixedSize) settings.Set("mode", phoneMode ? "phone" : "full");
             settings.Set("pinned", pinned ? "1" : "0");
             if (phoneLocation.HasValue) settings.Set("phone", phoneLocation.Value.X + "," + phoneLocation.Value.Y);
+            settings.Set("terminal", terminal.RestoreSize.Width + "," + terminal.RestoreSize.Height + "," +
+                terminal.Offset.X + "," + terminal.Offset.Y);
             // A web app always reopens at its own address; the browser reopens where you left off.
             if (!options.IsApp && web != null && !string.IsNullOrEmpty(web.Source)) settings.Set("url", web.Source);
             settings.Save();
@@ -288,7 +371,10 @@ namespace Fedatather
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
-            if (devTools != null) devTools.Close();
+            CloseAllTools();
+            if (settingsWindow != null) settingsWindow.Close();
+            terminal.View.Stop();
+            passwords.Dispose(); // locks: the key leaves memory
             foreach (BrowserTab tab in tabs) tab.Controller.Close();
             tabs.Clear();
             controller = null; web = null;
@@ -300,7 +386,8 @@ namespace Fedatather
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (controller != null) controller.IsVisible = !bossMode && WindowState != FormWindowState.Minimized;
+            LayoutViews();
+            LayoutFloating();
         }
 
         protected override void OnMove(EventArgs e)
@@ -352,6 +439,7 @@ namespace Fedatather
         // Only the window size changes; sites always get the normal desktop request.
         void ApplyMode(bool phone)
         {
+            if (phone != phoneMode) ExitSplit(); // the panes differ: two rows in phone size, three columns in full screen
             if (WindowState != FormWindowState.Normal) WindowState = FormWindowState.Normal;
             if (phoneMode && shown) phoneLocation = Location; // remember where the phone window sat
             phoneMode = phone;
@@ -376,6 +464,10 @@ namespace Fedatather
             Native.SetRoundCorners(Handle, phone);
             modeBtn.Symbol = phone ? Icons.FullScreen : Icons.Phone;
             SetTip(modeBtn, phone ? "Full screen (F11)" : "Phone size (F11)");
+            if (phone) splitBtn.Glyph = Icons.DrawSplitRows; else splitBtn.Glyph = Icons.DrawSplit;
+            splitBtn.Invalidate();
+            if (!splitMode) SetTip(splitBtn, SplitTip());
+            LayoutViews();
         }
 
         static Rectangle KeepOnScreen(Rectangle r)
@@ -402,12 +494,14 @@ namespace Fedatather
         {
             htmlFullscreen = on;
             bar.Visible = !on && !bossMode;
-            tabBar.Visible = !on && !bossMode;
+            tabBar.Visible = !on && !bossMode && !options.IsApp;
+            UpdateTerminalVisibility();
             if (!phoneMode)
             {
                 Screen screen = Screen.FromRectangle(Bounds);
                 Bounds = on ? screen.Bounds : screen.WorkingArea;
             }
+            LayoutViews(); // in split screen, a fullscreen page takes over the whole page area
         }
 
         // The cover is a native control; hide WebView2 controllers explicitly because they own child HWNDs.
@@ -432,8 +526,13 @@ namespace Fedatather
             {
                 restoreDevTools = devTools != null && devTools.Visible;
                 if (restoreDevTools) devTools.Hide();
+                restoreSettings = settingsWindow != null && settingsWindow.Visible;
+                if (restoreSettings) settingsWindow.Hide();
+                restoreTerminalFocus = terminal.ContainsFocus;
+                passwords.Vault.Lock(); // coming back asks for the PIN again
                 foreach (BrowserTab tab in tabs) tab.Controller.IsVisible = false;
                 host.Visible = bar.Visible = tabBar.Visible = false;
+                UpdateTerminalVisibility(); // the shell keeps running behind the cover
                 // Close tab/context menus so their titles cannot remain over the cover.
                 foreach (Control button in tabButtons.Controls)
                     if (button.ContextMenuStrip != null) button.ContextMenuStrip.Close();
@@ -452,12 +551,17 @@ namespace Fedatather
                 bossBtn.Active = false;
                 bossCover.Visible = false;
                 host.Visible = true;
-                bar.Visible = tabBar.Visible = !htmlFullscreen;
+                bar.Visible = !htmlFullscreen;
+                tabBar.Visible = !htmlFullscreen && !options.IsApp;
+                UpdateTerminalVisibility();
                 LayoutBar();
-                if (controller != null) controller.IsVisible = WindowState != FormWindowState.Minimized;
+                LayoutViews();
                 UpdateTitle();
                 if (restoreDevTools && devTools != null) devTools.Show(this);
-                if (webHadFocus) FocusWeb(); else FocusAddress();
+                if (restoreSettings && settingsWindow != null) settingsWindow.Show(this); // locked by now: it asks for the PIN again
+                if (restoreTerminalFocus && terminal.Visible) terminal.View.Focus();
+                else if (webHadFocus) FocusWeb();
+                else FocusAddress();
             }
             SetTip(bossBtn, bossMode ? "Restore browser (Ctrl+Shift+B)" : "Boss mode (Ctrl+Shift+B)");
         }
@@ -473,12 +577,403 @@ namespace Fedatather
 
         void ToggleDevTools()
         {
-            if (web == null || bossMode) return;
-            if (devTools != null) { devTools.Close(); return; }
-            devTools = new DevToolsLite(this, env, web, theme, scale);
-            devTools.FormClosed += delegate { devTools = null; devBtn.Active = false; };
-            devTools.Show(this); // owned: stays above this window (and above it when pinned)
+            if (bossMode) return;
+            if (toolsOn) { CloseAllTools(); return; }
+            if (web == null) return;
+            toolsOn = true;
             devBtn.Active = true;
+            ShowTools(activeTab, true);
+        }
+
+        // Shows the tab's own DevTools Lite, creating it if needed. In split screen each pane's page keeps its own,
+        // so what was collected from one page survives looking at another; only the current pane's is on screen.
+        void ShowTools(BrowserTab tab, bool activate)
+        {
+            if (tab == null || !toolsOn || bossMode) { UpdatePanes(); return; }
+            DevToolsLite tools = tab.Tools;
+            if (tools == null)
+            {
+                tools = new DevToolsLite(this, env, tab.Web, theme, scale);
+                if (!toolsBounds.IsEmpty) tools.Bounds = toolsBounds;
+                DevToolsLite created = tools;
+                created.FormClosed += delegate
+                {
+                    if (tab.Tools == created) tab.Tools = null;
+                    if (devTools == created) devTools = null;
+                    if (!toolsClosingQuietly) CloseAllTools(); // closed with its own ✕: DevTools Lite is off
+                };
+                tab.Tools = tools;
+            }
+            tools.OpenInBackground = !activate;
+            tools.Text = ToolsTitle(tab);
+            devTools = tools;
+            if (!tools.Visible) tools.Show(this); // owned: stays above this window (and above it when pinned)
+            UpdatePanes();
+        }
+
+        // Says which page it reads; in split screen, which pane too (the one with the red dot).
+        string ToolsTitle(BrowserTab tab)
+        {
+            int pane = splitMode ? Array.IndexOf(panes, tab) : -1;
+            return pane < 0 ? "DevTools Lite" : "DevTools Lite — reading pane " + (pane + 1) + " ● " + tab.Title;
+        }
+
+        // The current page changed. In split screen DevTools Lite follows it (the old page's is kept, hidden);
+        // otherwise it closes, as switching tabs always did.
+        void SwitchTools(BrowserTab tab)
+        {
+            if (!toolsOn) return;
+            if (!splitMode) { CloseAllTools(); return; }
+            if (devTools != null)
+            {
+                toolsBounds = devTools.Bounds;
+                if (devTools.Visible) devTools.Hide();
+                devTools = null;
+            }
+            ShowTools(tab, false);
+        }
+
+        // One page's DevTools Lite, leaving DevTools Lite on (the page closed or left split screen).
+        void CloseTools(BrowserTab tab)
+        {
+            DevToolsLite tools = tab.Tools;
+            if (tools == null) return;
+            tab.Tools = null;
+            if (devTools == tools) devTools = null;
+            toolsClosingQuietly = true;
+            try { tools.Close(); }
+            finally { toolsClosingQuietly = false; }
+        }
+
+        void CloseAllTools()
+        {
+            toolsOn = false;
+            devBtn.Active = false;
+            foreach (BrowserTab tab in tabs.ToArray()) CloseTools(tab);
+            devTools = null;
+            UpdatePanes();
+        }
+
+        // ---------------------------------------------------------------- saved passwords
+
+        // The key appears in the address bar only on sites with saved logins, to fill them. Knowing that needs no PIN;
+        // the logins do. The password manager itself is in Settings.
+        void UpdateKeyButton()
+        {
+            address.ShowKeyButton = web != null && passwords.Vault.HasLoginsFor(web.Source);
+        }
+
+        // On a site with saved logins: unlock, then pick the login to fill. Elsewhere (Ctrl+Shift+K): the passwords
+        // in Settings.
+        void ShowPasswordMenu()
+        {
+            if (bossMode || closing) return;
+            BrowserTab tab = activeTab;
+            if (tab == null || !passwords.Vault.HasLoginsFor(tab.Web.Source)) { ShowSettings(); return; }
+            if (!passwords.EnsureUnlocked(this) || activeTab != tab) return;
+            List<SavedLogin> found;
+            try { found = passwords.Vault.FindFor(tab.Web.Source); }
+            catch (InvalidOperationException ex) { MessageBox.Show(this, ex.Message, Brand); return; }
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.ShowImageMargin = false;
+            Uri page;
+            string site = Uri.TryCreate(tab.Web.Source, UriKind.Absolute, out page) ? page.Host : tab.Web.Source;
+            menu.Items.Add("Fill a saved login on " + site.Replace("&", "&&")).Enabled = false;
+            menu.Items.Add(new ToolStripSeparator());
+            foreach (SavedLogin item in found)
+            {
+                SavedLogin login = item;
+                string text = login.Username.Length > 0 ? login.Username : "(no username)";
+                if (login.Name.Length > 0 && login.Name != login.Site) text += "   — " + login.Name;
+                ToolStripItem fill = menu.Items.Add(text.Replace("&", "&&"));
+                fill.ToolTipText = login.Url;
+                fill.Click += async delegate { await FillLogin(tab, login); };
+            }
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Manage saved passwords…").Click += delegate { BeginInvoke(new Action(ShowSettings)); };
+            menu.Closed += delegate { BeginInvoke(new Action(menu.Dispose)); };
+            menu.Show(address.KeyButton, new Point(0, address.KeyButton.Height));
+        }
+
+        // ---------------------------------------------------------------- settings
+
+        // The gear (Ctrl+,). Passwords is a section in here rather than a button of its own.
+        void ShowSettings() { OpenSettings(true, Rectangle.Empty); }
+
+        void OpenSettings(bool activate, Rectangle bounds)
+        {
+            if (bossMode || closing || env == null) return;
+            if (settingsWindow != null)
+            {
+                if (settingsWindow.WindowState == FormWindowState.Minimized) settingsWindow.WindowState = FormWindowState.Normal;
+                if (activate) settingsWindow.Activate();
+                return;
+            }
+            settingsWindow = new SettingsForm(this, env, passwords, theme, scale,
+                delegate(string url) { BeginInvoke(new Action(async delegate { Activate(); await OpenTabAsync(url, null); })); });
+            settingsWindow.BossKey = delegate { if (!bossMode) ToggleBossMode(); };
+            settingsWindow.OpenInBackground = !activate;
+            if (!bounds.IsEmpty) settingsWindow.Bounds = bounds;
+            settingsWindow.FormClosed += delegate { settingsWindow = null; settingsBtn.Active = false; };
+            settingsWindow.Show(this); // owned: stays above the browser, even when it's pinned
+            settingsBtn.Active = true;
+        }
+
+        // Fills only into the page the login was picked for, and only while that page is still on the login's site.
+        async Task<int> FillLogin(BrowserTab tab, SavedLogin login)
+        {
+            if (!tabs.Contains(tab) || !PasswordVault.Matches(login.Url, tab.Web.Source)) return 0;
+            passwords.Vault.Touch();
+            string result = await tab.Web.ExecuteScriptAsync(LoginFill.Script(login.Username, login.Password));
+            int filled;
+            if (!int.TryParse(result, out filled)) filled = 0;
+            if (filled == 0 && !IsDisposed)
+                tips.Show("No login fields found on this page.", address.KeyButton, 0, address.KeyButton.Height + S(4), 2500);
+            return filled;
+        }
+
+        // ---------------------------------------------------------------- split screen
+
+        string SplitTip()
+        {
+            return phoneMode ? "Split screen: two pages, top and bottom (Ctrl+\\)"
+                             : "Split screen: three pages side by side (Ctrl+\\)";
+        }
+
+        void ToggleSplit()
+        {
+            if (options.IsApp) return;
+            if (bossMode) return;
+            if (splitMode) ExitSplit(); else EnterSplit();
+        }
+
+        // Three panes in full screen, two in phone size: the current page and the most recently opened other tabs,
+        // in tab-strip order. With fewer tabs open, the remaining panes stay empty until something is opened in them.
+        // A dual web app is the only saved app that splits.
+        void EnterSplit()
+        {
+            if ((options.IsApp && !options.IsDual) || splitMode || bossMode) return;
+            List<BrowserTab> shown = new List<BrowserTab>();
+            if (activeTab != null) shown.Add(activeTab);
+            for (int i = tabs.Count - 1; i >= 0 && shown.Count < PaneCount; i--)
+                if (!shown.Contains(tabs[i])) shown.Add(tabs[i]);
+            shown.Sort(delegate(BrowserTab a, BrowserTab b) { return tabs.IndexOf(a).CompareTo(tabs.IndexOf(b)); });
+            Array.Clear(panes, 0, MaxPanes);
+            for (int i = 0; i < shown.Count; i++) panes[i] = shown[i];
+            currentPane = Math.Max(0, Array.IndexOf(panes, activeTab));
+            splitMode = true;
+            splitBtn.Active = true;
+            SetTip(splitBtn, "Leave split screen (Ctrl+\\)");
+            SetActive(activeTab, false);
+        }
+
+        // Back to one page: the current pane's tab, or the nearest shown one when the current pane is empty.
+        void ExitSplit()
+        {
+            if (!splitMode) return;
+            BrowserTab keep = activeTab;
+            for (int i = 0; keep == null && i < PaneCount; i++) keep = panes[(currentPane + i) % PaneCount];
+            if (keep == null && tabs.Count > 0) keep = tabs[tabs.Count - 1];
+            splitMode = false;
+            Array.Clear(panes, 0, MaxPanes);
+            // One page on screen again: only its DevTools Lite stays (if it is the current page's).
+            if (keep != activeTab) CloseAllTools();
+            else foreach (BrowserTab tab in tabs.ToArray()) if (tab != keep) CloseTools(tab);
+            splitBtn.Active = false;
+            SetTip(splitBtn, SplitTip());
+            bool focusWeb = webHadFocus;
+            SetActive(keep, false);
+            if (focusWeb) FocusWeb();
+        }
+
+        int TargetPane()
+        {
+            if (panes[currentPane] == null) return currentPane;
+            for (int i = 0; i < PaneCount; i++) if (panes[i] == null) return i;
+            return currentPane;
+        }
+
+        void FocusPane(int pane, bool moveFocus)
+        {
+            if (!splitMode || pane < 0 || pane >= PaneCount) return;
+            currentPane = pane;
+            SetActive(panes[pane], moveFocus);
+        }
+
+        void ShowInPane(int pane, BrowserTab tab)
+        {
+            if (!splitMode || !tabs.Contains(tab)) return;
+            int old = Array.IndexOf(panes, tab);
+            if (old >= 0) panes[old] = null;
+            panes[pane] = tab;
+            currentPane = pane;
+            SetActive(tab, true);
+        }
+
+        // The pane's ✕: the pane empties, its tab stays open in the tab strip.
+        void ClearPane(int pane)
+        {
+            if (!splitMode || panes[pane] == null) return;
+            panes[pane] = null;
+            currentPane = pane;
+            SetActive(null, false);
+        }
+
+        // Positions the page views: one filling the page area, or the three split-screen panes (each with its header,
+        // and an empty pane's placeholder where no page is shown). A page in fullscreen takes the whole area.
+        void LayoutViews()
+        {
+            if (host == null || paneHeaders[MaxPanes - 1] == null) return; // still constructing
+            Rectangle area = host.ClientRectangle;
+            bool show = !bossMode && WindowState != FormWindowState.Minimized;
+            bool split = splitMode && !(htmlFullscreen && activeTab != null);
+            int count = PaneCount;
+            bool rows = phoneMode; // phone size stacks the panes top and bottom; full screen puts them side by side
+            int gap = Math.Max(1, S(1)), headerH = S(28);
+            int size = ((rows ? area.Height : area.Width) - gap * (count - 1)) / count;
+            // Every pane's page sits inside a frame, so marking the current one never resizes a page.
+            int frame = Math.Max(2, S(2));
+            Rectangle[] content = new Rectangle[MaxPanes];
+            Rectangle marked = Rectangle.Empty;
+            for (int i = 0; i < MaxPanes; i++)
+            {
+                bool used = split && i < count;
+                paneHeaders[i].Visible = used;
+                emptyPanes[i].Visible = used && panes[i] == null;
+                if (!used) continue;
+                Rectangle column;
+                if (rows)
+                {
+                    int y = area.Y + i * (size + gap);
+                    column = new Rectangle(area.X, y, area.Width, i == count - 1 ? area.Bottom - y : size);
+                }
+                else
+                {
+                    int x = area.X + i * (size + gap);
+                    column = new Rectangle(x, area.Y, i == count - 1 ? area.Right - x : size, area.Height);
+                }
+                content[i] = new Rectangle(column.X + frame, column.Y + headerH,
+                    Math.Max(0, column.Width - frame * 2), Math.Max(0, column.Height - headerH - frame));
+                if (i == currentPane) marked = column;
+                paneHeaders[i].SetBounds(column.X, column.Y, column.Width, headerH);
+                emptyPanes[i].Bounds = content[i];
+            }
+            foreach (BrowserTab tab in tabs)
+            {
+                int pane = split ? Array.IndexOf(panes, tab) : -1;
+                bool visible = show && (split ? pane >= 0 : tab == activeTab);
+                if (visible) tab.Controller.Bounds = split ? content[pane] : area;
+                tab.Controller.IsVisible = visible;
+                // Pages out of sight keep running but let WebView2 trim their memory (Microsoft's guidance: only
+                // ever lower it for hidden pages). Set only on change: it's a call into the engine.
+                CoreWebView2MemoryUsageTargetLevel level = visible
+                    ? CoreWebView2MemoryUsageTargetLevel.Normal : CoreWebView2MemoryUsageTargetLevel.Low;
+                if (tab.MemoryLevel != level)
+                {
+                    try { tab.Web.MemoryUsageTargetLevel = level; tab.MemoryLevel = level; }
+                    catch (Exception) { } // an older WebView2 Runtime without it: the page just keeps its memory
+                }
+            }
+            host.BackColor = split ? theme.Border : theme.Page; // the gaps and frames between panes
+            if (marked != markedPane) { markedPane = marked; host.Invalidate(); }
+        }
+
+        // Pane headers' titles and current-pane highlight, and what each empty pane offers.
+        void UpdatePanes()
+        {
+            if (!splitMode || paneHeaders[MaxPanes - 1] == null) return;
+            List<BrowserTab> offscreen = new List<BrowserTab>();
+            foreach (BrowserTab tab in tabs) if (Array.IndexOf(panes, tab) < 0) offscreen.Add(tab);
+            for (int i = 0; i < PaneCount; i++)
+            {
+                int pane = i;
+                BrowserTab shown = panes[i];
+                paneHeaders[i].Title = shown == null ? "Empty" : shown.Title;
+                paneHeaders[i].Current = i == currentPane;
+                paneHeaders[i].Reading = devTools != null && shown != null && devTools == shown.Tools;
+                paneHeaders[i].CloseButton.Visible = shown != null && !options.IsDual; // a dual app keeps both pages
+                if (shown != null) continue;
+                List<PaneChoice> choices = new List<PaneChoice>();
+                choices.Add(new PaneChoice { Text = "+   New tab", Pick = async delegate
+                {
+                    if (!splitMode || panes[pane] != null) return;
+                    currentPane = pane;
+                    await OpenTabAsync(HomeUrl, null);
+                } });
+                foreach (BrowserTab item in offscreen)
+                {
+                    BrowserTab tab = item;
+                    choices.Add(new PaneChoice { Text = tab.Title, Tip = tab.Url, Pick = delegate { ShowInPane(pane, tab); } });
+                }
+                emptyPanes[i].SetChoices(choices);
+            }
+        }
+
+        // ---------------------------------------------------------------- terminal
+
+        void UpdateTerminalVisibility()
+        {
+            bool room = !bossMode && !htmlFullscreen;
+            terminal.Visible = terminalOpen && room;
+            termFab.Visible = !terminalOpen && room;
+        }
+
+        // Keeps the terminal button in the page's bottom-right corner and the terminal window inside the page.
+        void LayoutFloating()
+        {
+            if (termFab == null) return; // still constructing
+            Rectangle a = host.Bounds;
+            int margin = S(10);
+            termFab.Location = new Point(a.Right - termFab.Width - margin, a.Bottom - termFab.Height - margin);
+            if (terminal.Visible) terminal.Fit();
+        }
+
+        // Show the terminal window (starting PowerShell the first time) or fold it back into its button. Folding
+        // keeps the shell running, as in VS Code.
+        void ToggleTerminal()
+        {
+            if (bossMode) return;
+            if (terminalOpen) HideTerminal(); else ShowTerminal();
+        }
+
+        // Ctrl+`: a terminal that is open but not focused gets the focus; otherwise toggle it.
+        void TerminalShortcut()
+        {
+            if (bossMode) return;
+            if (terminalOpen && terminal.Visible && !terminal.View.Focused) terminal.View.Focus();
+            else ToggleTerminal();
+        }
+
+        void ShowTerminal()
+        {
+            terminalOpen = true;
+            UpdateTerminalVisibility();
+            terminal.Fit(); // size the terminal before PowerShell starts, so it starts at the right width
+            terminal.PerformLayout();
+            if (!terminal.View.Running)
+            {
+                try { terminal.View.Start(); }
+                catch (Exception ex)
+                {
+                    terminalOpen = false;
+                    UpdateTerminalVisibility();
+                    string why = ex is EntryPointNotFoundException
+                        ? "The terminal needs Windows 10 version 1809 or later." : ex.Message;
+                    MessageBox.Show(this, "Could not start PowerShell:\n\n" + why, Brand,
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                terminal.Invalidate(); // header shows the shell's name
+            }
+            if (terminal.Visible) terminal.View.Focus();
+        }
+
+        void HideTerminal()
+        {
+            if (!terminalOpen) return;
+            if (terminal.ContainsFocus) FocusWeb(); // before hiding, so focus doesn't land in the address bar
+            terminalOpen = false;
+            UpdateTerminalVisibility();
         }
 
         // ---------------------------------------------------------------- web apps
@@ -489,10 +984,16 @@ namespace Fedatather
             saveDialogOpen = true;
             try
             {
-                string url = web.Source;
+                // Phone size split top and bottom with two pages: offer saving both as one dual app.
+                string url = web.Source, url2 = null;
+                if (splitMode && phoneMode && panes[0] != null && panes[1] != null)
+                {
+                    url = panes[0].Web.Source;
+                    url2 = panes[1].Web.Source;
+                }
                 var iconTask = WebApps.FetchIconAsync(web, web.Settings.UserAgent);
                 using (SaveAppDialog dlg = new SaveAppDialog(theme, scale,
-                    WebApps.SuggestName(web.DocumentTitle, url), url, pinned, iconTask))
+                    WebApps.SuggestName(web.DocumentTitle, url), url, url2, pinned, iconTask))
                 {
                     if (dlg.ShowDialog(this) != DialogResult.OK) return;
                     WebAppSpec spec = dlg.Result;
@@ -525,7 +1026,14 @@ namespace Fedatather
                     null, Path.Combine(Program.DataDir, "WebView2"));
                 if (IsDisposed) return;
                 await OpenTabAsync(startUrl, null);
-                if (!closing) newTabButton.Enabled = true;
+                if (options.IsDual && !closing)
+                {
+                    // Dual app: the first page on top, the second below it, both live at once.
+                    EnterSplit();
+                    await OpenTabAsync(options.Url2, null);
+                    if (splitMode && !closing) FocusPane(0, true);
+                }
+                if (!closing) newTabButton.Enabled = !options.IsApp;
             }
             catch (WebView2RuntimeNotFoundException)
             {
@@ -553,6 +1061,8 @@ namespace Fedatather
             try
             {
                 if (closing || IsDisposed || env == null) return null;
+                // Saved apps own exactly one page (a dual app two), including concurrent and indirect open requests.
+                if (options.IsApp && tabs.Count >= (options.IsDual ? 2 : 1)) return null;
                 // Serialize opens, including popup requests, so there are never more than five controllers.
                 if (tabs.Count >= FoldedTabs.MaxOpenTabs)
                 {
@@ -562,6 +1072,10 @@ namespace Fedatather
                     RemoveTab(oldest);
                 }
                 CoreWebView2Controller c = await env.CreateCoreWebView2ControllerAsync(host.Handle);
+                if (closing || IsDisposed) { c.Close(); return null; }
+                // Before the first navigation, so the selection bar is in every page from the start.
+                try { await c.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(SelectionActions.Script); }
+                catch (Exception) { } // the page still works without it
                 if (closing || IsDisposed) { c.Close(); return null; }
                 BrowserTab tab = new BrowserTab { Controller = c, Web = c.CoreWebView2, Url = url,
                     Title = restore == null ? "New tab" : restore.Title };
@@ -591,22 +1105,31 @@ namespace Fedatather
             page.SourceChanged += delegate
             {
                 tab.Url = page.Source;
-                if (activeTab == tab) ShowUrl();
+                if (activeTab == tab) { ShowUrl(); UpdateKeyButton(); }
             };
             page.HistoryChanged += delegate { if (activeTab == tab) UpdateNavButtons(); };
-            page.NavigationStarting += delegate
+            page.NavigationStarting += delegate(object sender, CoreWebView2NavigationStartingEventArgs e)
             {
+                if (options.IsApp && tab.InitialNavigationComplete && e.IsUserInitiated && !e.IsRedirected &&
+                    e.NavigationKind == CoreWebView2NavigationKind.NewDocument)
+                {
+                    e.Cancel = true;
+                    OpenAppLink(e.Uri);
+                    return;
+                }
                 tab.Loading = true;
                 if (activeTab == tab) SetLoading(true);
             };
             page.NavigationCompleted += delegate
             {
+                tab.InitialNavigationComplete = true;
                 tab.Loading = false;
+                if (tab.Tools != null) tab.Tools.PageChanged();
                 if (activeTab != tab) return;
                 SetLoading(false);
                 UpdateNavButtons();
-                if (devTools != null) devTools.PageChanged();
             };
+            page.FaviconChanged += delegate { passwords.CaptureIcon(page); }; // only kept for sites with saved logins
             page.DocumentTitleChanged += delegate
             {
                 tab.Title = string.IsNullOrEmpty(page.DocumentTitle) ? tab.Url : page.DocumentTitle;
@@ -614,30 +1137,57 @@ namespace Fedatather
                 UpdateTabs();
             };
             page.NewWindowRequested += OnNewWindowRequested;
+            page.WebMessageReceived += OnPageMessage;
             page.ContainsFullScreenElementChanged += delegate
             {
                 if (activeTab == tab) SetHtmlFullscreen(page.ContainsFullScreenElement);
             };
             tab.Controller.AcceleratorKeyPressed += OnAcceleratorKeyPressed;
-            tab.Controller.GotFocus += delegate { if (activeTab == tab) webHadFocus = true; };
+            tab.Controller.GotFocus += delegate
+            {
+                // Clicking into a split-screen pane makes it the current one.
+                int pane = splitMode ? Array.IndexOf(panes, tab) : -1;
+                if (pane >= 0 && activeTab != tab)
+                    BeginInvoke(new Action(delegate { if (splitMode && panes[pane] == tab) FocusPane(pane, false); }));
+                if (activeTab == tab || pane >= 0) webHadFocus = true;
+            };
         }
 
+        // Shows the tab: in split screen, in its pane if it has one, otherwise in the current pane when that's empty,
+        // else in the first empty pane, else in place of the current pane's tab (which stays open).
         void ActivateTab(BrowserTab tab)
         {
-            if (activeTab != tab && devTools != null) devTools.Close();
-            if (controller != null) controller.IsVisible = false;
+            if (splitMode)
+            {
+                int pane = Array.IndexOf(panes, tab);
+                if (pane < 0)
+                {
+                    pane = TargetPane();
+                    panes[pane] = tab;
+                }
+                currentPane = pane;
+            }
+            SetActive(tab, true);
+        }
+
+        // Makes tab (null = the current split-screen pane is empty) the one the toolbar and address bar act on.
+        void SetActive(BrowserTab tab, bool moveFocus)
+        {
+            if (activeTab != tab) SwitchTools(tab);
             activeTab = tab;
-            controller = tab.Controller;
-            web = tab.Web;
-            controller.Bounds = host.ClientRectangle;
-            controller.IsVisible = !bossMode && WindowState != FormWindowState.Minimized;
-            SetHtmlFullscreen(web.ContainsFullScreenElement);
-            SetLoading(tab.Loading);
+            controller = tab == null ? null : tab.Controller;
+            web = tab == null ? null : tab.Web;
+            SetHtmlFullscreen(web != null && web.ContainsFullScreenElement);
+            SetLoading(tab != null && tab.Loading);
             UpdateNavButtons();
-            address.Box.Text = tab.Url == "about:blank" ? "" : tab.Url;
+            address.Box.Text = tab == null || tab.Url == "about:blank" ? "" : tab.Url;
             UpdateTitle();
             UpdateTabs();
-            FocusWeb();
+            UpdateKeyButton();
+            LayoutViews();
+            if (!moveFocus) return;
+            if (tab != null) FocusWeb();
+            else if (!bossMode) FocusAddress(); // an empty pane: type the address to show there
         }
 
         void UpdateTitle()
@@ -649,21 +1199,29 @@ namespace Fedatather
         void RemoveTab(BrowserTab tab)
         {
             bool wasActive = activeTab == tab;
+            int pane = Array.IndexOf(panes, tab);
+            if (pane >= 0) panes[pane] = null; // its pane stays, empty
+            CloseTools(tab);
             if (wasActive)
             {
-                if (devTools != null) devTools.Close();
                 activeTab = null; controller = null; web = null;
                 SetHtmlFullscreen(false);
             }
             tabs.Remove(tab);
             tab.Controller.Close();
-            if (wasActive && tabs.Count > 0) ActivateTab(tabs[tabs.Count - 1]);
+            if (wasActive)
+            {
+                if (splitMode) SetActive(null, false);
+                else if (tabs.Count > 0) ActivateTab(tabs[tabs.Count - 1]);
+            }
             UpdateTabs();
+            LayoutViews();
         }
 
         void CloseActiveTab()
         {
-            if (tabs.Count <= 1) { Close(); return; }
+            if (activeTab == null) return; // an empty split-screen pane
+            if (tabs.Count <= 1 || options.IsDual) { Close(); return; }
             RemoveTab(activeTab);
         }
 
@@ -680,8 +1238,10 @@ namespace Fedatather
             foreach (BrowserTab item in tabs)
             {
                 BrowserTab tab = item;
+                int pane = splitMode ? Array.IndexOf(panes, tab) : -1;
                 SafariTabButton b = new SafariTabButton(theme) { Text = tab.Title, Font = Font,
-                    Active = tab == activeTab, Margin = new Padding(1), Height = S(30) };
+                    Active = tab == activeTab, Margin = new Padding(1), Height = S(30),
+                    Badge = pane >= 0 ? (pane + 1).ToString() : null, Target = pane >= 0 && pane == currentPane };
                 SetTip(b, tab.Title + "\n" + tab.Url + "\nMiddle-click or right-click to close (Ctrl+W)");
                 b.Click += delegate { ActivateTab(tab); };
                 b.MouseUp += delegate(object sender, MouseEventArgs e)
@@ -701,6 +1261,8 @@ namespace Fedatather
             foldedButton.Text = "Folded (" + folded.Pages.Count + ")";
             LayoutTabs();
             tabButtons.ResumeLayout();
+            if (devTools != null && activeTab != null) devTools.Text = ToolsTitle(activeTab);
+            UpdatePanes();
         }
 
         void LayoutTabs()
@@ -712,6 +1274,7 @@ namespace Fedatather
 
         void ShowFoldedTabs()
         {
+            if (options.IsApp) return;
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.ShowImageMargin = false;
             menu.Items.Add("Folded tabs — click a page to restore").Enabled = false;
@@ -731,9 +1294,14 @@ namespace Fedatather
 
         void Navigate(string input)
         {
-            if (web == null) return;
             string url = ToUrl(input);
             if (url == null) return;
+            if (web == null)
+            {
+                // An empty split-screen pane is current: the address opens there in a new tab.
+                if (splitMode) BeginInvoke(new Action(async delegate { await OpenTabAsync(url, null); }));
+                return;
+            }
             try { web.Navigate(url); }
             catch (ArgumentException) { web.Navigate(SearchUrl + Uri.EscapeDataString(input.Trim())); }
         }
@@ -762,6 +1330,12 @@ namespace Fedatather
 
         void OnNewWindowRequested(object sender, CoreWebView2NewWindowRequestedEventArgs e)
         {
+            if (options.IsApp)
+            {
+                e.Handled = true;
+                OpenAppLink(e.Uri);
+                return;
+            }
             // Sized sign-in popups retain WebView2's popup behavior and window.opener.
             CoreWebView2WindowFeatures f = e.WindowFeatures;
             if (f != null && (f.HasSize || f.HasPosition)) return;
@@ -769,6 +1343,47 @@ namespace Fedatather
             string url = e.Uri;
             // Leave the engine callback before folding: its originating view may be the oldest tab.
             BeginInvoke(new Action(async delegate { await OpenTabAsync(url, null); }));
+        }
+
+        // The selection bar's Translate / Ask AI buttons: open the service with the selected text in a new tab
+        // (a saved web app has only its own page, so there it opens in the default browser).
+        void OnPageMessage(object sender, CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            Dictionary<string, object> m;
+            try { m = Json.Parse(e.WebMessageAsJson) as Dictionary<string, object>; }
+            catch (FormatException) { return; }
+            string action = Json.Str(m, "selAction"), text = Json.Str(m, "text");
+            string url = SelectionActions.UrlFor(action, text);
+            if (url == null) return;
+            // Leave the engine callback first: opening a tab may fold the page that sent the message.
+            BeginInvoke(new Action(async delegate
+            {
+                if (closing || IsDisposed || bossMode) return;
+                if (SelectionActions.CopiesText(action))
+                {
+                    try { Clipboard.SetText(SelectionActions.Clip(text.Trim(), 100000)); }
+                    catch (Exception) { } // the clipboard is busy: the address still carries the question
+                }
+                if (options.IsApp) OpenAppLink(url);
+                else await OpenTabAsync(url, null);
+            }));
+        }
+
+        void OpenAppLink(string url)
+        {
+            Uri uri;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)) return;
+            BeginInvoke(new Action(delegate
+            {
+                if (closing || IsDisposed) return;
+                try { openExternalLink(uri.AbsoluteUri); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Could not open the default browser:\n\n" + ex.Message,
+                        windowName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }));
         }
 
         void OnAcceleratorKeyPressed(object sender, CoreWebView2AcceleratorKeyPressedEventArgs e)
@@ -793,6 +1408,16 @@ namespace Fedatather
                 return true;
             }
             if (bossMode) return key != (Keys.Alt | Keys.F4);
+            if (key == (Keys.Control | Keys.Oemtilde))
+            {
+                BeginInvoke(new Action(TerminalShortcut));
+                return true;
+            }
+            // While the terminal has focus the shell gets every key except these window-level shortcuts, as in VS Code.
+            if (!fromWeb && terminal.View.Focused && key != Keys.F11 && key != Keys.F12 &&
+                key != (Keys.Control | Keys.Shift | Keys.P) &&
+                key != (Keys.Control | Keys.Tab) && key != (Keys.Control | Keys.Shift | Keys.Tab))
+                return false;
             switch (key)
             {
                 case Keys.F11:
@@ -804,6 +1429,23 @@ namespace Fedatather
                 case Keys.Control | Keys.Shift | Keys.P:
                     ApplyPin(!pinned);
                     return true;
+                case Keys.Control | Keys.Oemcomma:
+                    BeginInvoke(new Action(ShowSettings));
+                    return true;
+                case Keys.Control | Keys.Shift | Keys.K:
+                    BeginInvoke(new Action(ShowPasswordMenu)); // don't open a modal dialog inside a key callback
+                    return true;
+                case Keys.Control | Keys.OemPipe: // Ctrl+\, as VS Code's split editor
+                    if (options.IsApp) return true;
+                    BeginInvoke(new Action(ToggleSplit));
+                    return true;
+                case Keys.Control | Keys.D1:
+                case Keys.Control | Keys.D2:
+                case Keys.Control | Keys.D3:
+                    if (!splitMode) return false;
+                    int pane = (int)(key & Keys.KeyCode) - (int)Keys.D1;
+                    BeginInvoke(new Action(delegate { if (splitMode) FocusPane(pane, true); }));
+                    return true;
                 case Keys.Control | Keys.D:
                     if (options.IsApp) return false;
                     BeginInvoke(new Action(SaveAsApp)); // don't open a modal dialog inside a key callback
@@ -814,10 +1456,12 @@ namespace Fedatather
                     FocusAddress();
                     return true;
                 case Keys.Control | Keys.T:
+                    if (options.IsApp) return true;
                     BeginInvoke(new Action(async delegate { await OpenTabAsync(HomeUrl, null); }));
                     return true;
                 case Keys.Control | Keys.Tab:
                 case Keys.Control | Keys.Shift | Keys.Tab:
+                    if (options.IsApp) return true;
                     if (tabs.Count > 0)
                     {
                         int delta = (key & Keys.Shift) != 0 ? -1 : 1;
@@ -888,9 +1532,8 @@ namespace Fedatather
 
         void UpdateNavButtons()
         {
-            if (web == null) return;
-            backBtn.Enabled = web.CanGoBack;
-            fwdBtn.Enabled = web.CanGoForward;
+            backBtn.Enabled = web != null && web.CanGoBack;
+            fwdBtn.Enabled = web != null && web.CanGoForward;
         }
 
         void ShowUrl()

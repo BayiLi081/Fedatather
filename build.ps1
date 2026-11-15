@@ -131,13 +131,30 @@ $bossImage = Join-Path $root 'assets\boss_public.jpg'
 $personalBossImage = Join-Path $root 'assets\boss_here.jpg'
 if (-not $PublicRelease -and (Test-Path $personalBossImage)) { $bossImage = $personalBossImage }
 
+# Re-encode the boss image as JPEG quality 75 to keep the exe small, if that is actually smaller. Drawing it onto a
+# fresh bitmap also leaves any camera / editor metadata behind. The file in assets\ is never changed.
+$bossSmall = Join-Path $work 'boss.jpg'
+$source = [System.Drawing.Image]::FromFile($bossImage)
+try {
+    $plain = New-Object System.Drawing.Bitmap($source)
+    $jpeg = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+    $quality = New-Object System.Drawing.Imaging.EncoderParameters 1
+    $quality.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality), ([long]75)
+    $plain.Save($bossSmall, $jpeg, $quality)
+    $plain.Dispose()
+}
+finally { $source.Dispose() }
+if ((Get-Item $bossSmall).Length -lt (Get-Item $bossImage).Length) { $bossImage = $bossSmall }
+
 # --- Compile ------------------------------------------------------------------------
 $exe = Join-Path $dist 'Fedatather.exe'
 $sources = Get-ChildItem (Join-Path $src '*.cs') | ForEach-Object { $_.FullName }
+# Page scripts and HTML go in as UTF-8 resources, read back by Embedded.Text (half the size of C# string literals).
+$scripts = Get-ChildItem (Join-Path $src 'scripts') -File | ForEach-Object { "/resource:$($_.FullName),Fedatather.Script.$($_.Name)" }
 & $csc /nologo /target:winexe /platform:x64 /optimize+ /langversion:5 `
     "/out:$exe" "/win32icon:$ico" "/win32manifest:$(Join-Path $src 'app.manifest')" `
     "/reference:$coreDll" /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll `
-    "/resource:$bossImage,Fedatather.BossImage" $sources
+    "/resource:$bossImage,Fedatather.BossImage" $scripts $sources
 if ($LASTEXITCODE -ne 0) { throw "Compilation failed." }
 
 $kb = [Math]::Round(((Get-ChildItem $dist -File | Measure-Object Length -Sum).Sum) / 1KB)

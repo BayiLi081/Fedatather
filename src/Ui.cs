@@ -25,8 +25,57 @@ namespace Fedatather
         public const string InstallApp = "";
         public const string Person = "\uE77B";
         public const string DevTools = "";
+        public const string Delete = "";
+        public const string Key = "";
+        public const string Settings = "";
+        public const string ChevronUp = "";
+        public const string ChevronDown = "";
 
         static Font font;
+
+        // Split screen: a window outline divided into three columns.
+        public static void DrawSplit(Graphics g, Rectangle bounds, Color color)
+        {
+            int x, y, w, h;
+            float stroke;
+            Frame(g, bounds, out x, out y, out w, out h, out stroke);
+            SmoothingMode smoothing = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath outline = Gfx.RoundRect(new RectangleF(x + stroke / 2, y + stroke / 2, w - stroke, h - stroke), stroke * 1.5f))
+            using (Pen pen = new Pen(color, stroke))
+                g.DrawPath(pen, outline);
+            g.SmoothingMode = smoothing;
+            using (SolidBrush brush = new SolidBrush(color))
+                for (int i = 1; i <= 2; i++)
+                    g.FillRectangle(brush, x + (float)Math.Round(w * i / 3f - stroke / 2), y, stroke, h);
+        }
+
+        // Split screen in phone size: a window outline divided into two rows.
+        public static void DrawSplitRows(Graphics g, Rectangle bounds, Color color)
+        {
+            int x, y, w, h;
+            float stroke;
+            Frame(g, bounds, out x, out y, out w, out h, out stroke);
+            SmoothingMode smoothing = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath outline = Gfx.RoundRect(new RectangleF(x + stroke / 2, y + stroke / 2, w - stroke, h - stroke), stroke * 1.5f))
+            using (Pen pen = new Pen(color, stroke))
+                g.DrawPath(pen, outline);
+            g.SmoothingMode = smoothing;
+            using (SolidBrush brush = new SolidBrush(color))
+                g.FillRectangle(brush, x, y + (float)Math.Round(h / 2f - stroke / 2), w, stroke);
+        }
+
+        // Icon-sized box centred in bounds, matching the icon font's glyphs.
+        static void Frame(Graphics g, Rectangle bounds, out int x, out int y, out int w, out int h, out float stroke)
+        {
+            float em = Font.SizeInPoints * g.DpiY / 72f;
+            stroke = Math.Max(1f, (float)Math.Round(em / 13f));
+            w = (int)Math.Round(em);
+            h = (int)Math.Round(em * 0.8f);
+            x = bounds.X + (bounds.Width - w) / 2;
+            y = bounds.Y + (bounds.Height - h) / 2;
+        }
 
         public static Font Font
         {
@@ -50,6 +99,7 @@ namespace Fedatather
     {
         public bool Dark;
         public Color Bar, TabBar, TabHover, TabActive, Border, Fore, Muted, ForeDisabled, Hover, Press, Field, FieldBorder, Accent, AccentFore, Danger, Page;
+        public Color Target; // split screen: marks the current pane, the one DevTools Lite reads
 
         public static Theme FromSystem()
         {
@@ -89,6 +139,7 @@ namespace Fedatather
                 t.Page = Color.White;
             }
             t.Danger = Hex(0xC42B1C);
+            t.Target = Hex(0xE81123);
             return t;
         }
 
@@ -100,6 +151,8 @@ namespace Fedatather
         readonly Theme theme;
         bool hover;
         public bool Active;
+        public string Badge; // split screen: the number of the pane showing this tab
+        public bool Target;  // split screen: this tab is in the current pane (red marker)
 
         public SafariTabButton(Theme theme)
         {
@@ -128,9 +181,249 @@ namespace Fedatather
                     g.FillPath(brush, path);
             }
             Rectangle textBounds = Rectangle.Inflate(ClientRectangle, -8, 0);
+            if (!string.IsNullOrEmpty(Badge))
+            {
+                TextFormatFlags badgeFlags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                                             TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+                string badge = Target ? "● " + Badge : Badge; // ● n
+                using (Font bold = new Font(Font, FontStyle.Bold))
+                {
+                    TextRenderer.DrawText(g, badge, bold, textBounds, Target ? theme.Target : theme.Accent, badgeFlags);
+                    int bw = TextRenderer.MeasureText(g, badge, bold, Size.Empty, badgeFlags).Width + 6;
+                    textBounds = new Rectangle(textBounds.X + bw, textBounds.Y, Math.Max(0, textBounds.Width - bw), textBounds.Height);
+                }
+            }
             TextRenderer.DrawText(g, Text, Font, textBounds, Active ? theme.Fore : theme.Muted,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                 TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+    }
+
+    // The title strip over a split-screen pane: its number and page title. The current pane (the one the address
+    // bar, back / forward and DevTools Lite act on) gets a red dot and a red top edge.
+    sealed class PaneHeader : Control
+    {
+        readonly Theme theme;
+        readonly float scale;
+        readonly Font font = new Font("Segoe UI", 8.25f), closeFont = new Font(Icons.Font.FontFamily, 7f);
+        public readonly IconButton CloseButton;
+        public int Number;
+        string title = "";
+        bool current, reading;
+
+        // DevTools Lite is reading this pane's page: says so in the header.
+        public bool Reading
+        {
+            get { return reading; }
+            set { if (reading != value) { reading = value; Invalidate(); } }
+        }
+
+        public PaneHeader(Theme theme, float scale)
+        {
+            this.theme = theme;
+            this.scale = scale;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);
+            CloseButton = new IconButton(theme, Icons.Close);
+            CloseButton.Round = true;
+            CloseButton.Surface = theme.TabBar;
+            CloseButton.SymbolFont = closeFont;
+            Controls.Add(CloseButton);
+        }
+
+        int S(int px) { return (int)Math.Round(px * scale); }
+
+        public string Title
+        {
+            get { return title; }
+            set { value = value ?? ""; if (title != value) { title = value; Invalidate(); } }
+        }
+
+        public bool Current
+        {
+            get { return current; }
+            set
+            {
+                if (current == value) return;
+                current = value;
+                CloseButton.Surface = value ? theme.Page : theme.TabBar;
+                CloseButton.Invalidate();
+                Invalidate();
+            }
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            if (CloseButton == null) return; // layout fires while the constructor is still adding children
+            int s = Math.Max(0, Height - S(6));
+            CloseButton.SetBounds(Width - s - S(4), (Height - s) / 2, s, s);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(current ? theme.Page : theme.TabBar);
+            using (Pen p = new Pen(theme.Border)) g.DrawLine(p, 0, Height - 1, Width, Height - 1);
+            int x = S(10);
+            if (current)
+                using (SolidBrush b = new SolidBrush(theme.Target))
+                {
+                    g.FillRectangle(b, 0, 0, Width, Math.Max(2, S(3)));
+                    int d = S(9);
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.FillEllipse(b, x, (Height - d) / 2 + S(1), d, d); // the red dot
+                    g.SmoothingMode = SmoothingMode.None;
+                    x += d + S(6);
+                }
+            TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                                    TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+            string number = Number.ToString();
+            using (Font bold = new Font(font, FontStyle.Bold))
+            {
+                TextRenderer.DrawText(g, number, bold, new Rectangle(x, 0, Width, Height), current ? theme.Target : theme.Muted, flags);
+                x += TextRenderer.MeasureText(g, number, bold, Size.Empty, flags).Width + S(8);
+            }
+            int right = (CloseButton.Visible ? CloseButton.Left : Width) - S(6);
+            if (reading)
+                using (Font bold = new Font(font, FontStyle.Bold))
+                {
+                    const string label = "DevTools Lite reads this page";
+                    int w = TextRenderer.MeasureText(g, label, bold, Size.Empty, flags).Width;
+                    if (right - w - S(12) > x + S(60)) // only when there's still room for the title
+                    {
+                        TextRenderer.DrawText(g, label, bold, new Rectangle(right - w, 0, w, Height), theme.Target, flags);
+                        right -= w + S(12);
+                    }
+                }
+            if (right > x)
+                TextRenderer.DrawText(g, title, font, new Rectangle(x, 0, right - x, Height), current ? theme.Fore : theme.Muted,
+                    flags | TextFormatFlags.EndEllipsis);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { font.Dispose(); closeFont.Dispose(); }
+            base.Dispose(disposing);
+        }
+    }
+
+    sealed class PaneChoice
+    {
+        public string Text, Tip;
+        public Action Pick;
+    }
+
+    // What an empty split-screen pane shows: how to fill it, and buttons for a new tab and the open tabs that aren't
+    // on screen.
+    sealed class EmptyPane : Control
+    {
+        readonly Theme theme;
+        readonly float scale;
+        readonly Font headingFont = new Font("Segoe UI Semilight", 14f), textFont = new Font("Segoe UI", 9f);
+        readonly List<Button> buttons = new List<Button>();
+        readonly ToolTip tips = new ToolTip();
+        List<PaneChoice> choices = new List<PaneChoice>();
+        string signature;
+        Rectangle headingBounds, hintBounds;
+
+        public EmptyPane(Theme theme, float scale)
+        {
+            this.theme = theme;
+            this.scale = scale;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);
+            BackColor = theme.Page;
+        }
+
+        int S(int px) { return (int)Math.Round(px * scale); }
+
+        string Hint
+        {
+            get
+            {
+                return choices.Count > 1 ? "Type an address in the bar above, or show one of your open tabs here."
+                                         : "Type an address in the bar above, or open a new tab here.";
+            }
+        }
+
+        public void SetChoices(List<PaneChoice> list)
+        {
+            choices = list;
+            string sig = "";
+            foreach (PaneChoice c in list) sig += c.Text + "\n" + c.Tip + "\n";
+            if (sig == signature) return; // same buttons; their actions are looked up when clicked
+            signature = sig;
+            foreach (Button old in buttons) { tips.SetToolTip(old, null); old.Dispose(); }
+            buttons.Clear();
+            for (int i = 0; i < list.Count; i++)
+            {
+                int index = i;
+                Button b = new Button();
+                b.FlatStyle = FlatStyle.Flat;
+                b.TextAlign = ContentAlignment.MiddleLeft;
+                b.AutoEllipsis = true;
+                b.UseMnemonic = false;
+                b.Font = textFont;
+                b.ForeColor = theme.Fore;
+                b.BackColor = theme.Field;
+                b.Cursor = Cursors.Hand;
+                b.Padding = new Padding(S(6), 0, S(6), 0);
+                b.FlatAppearance.BorderColor = theme.FieldBorder;
+                b.FlatAppearance.MouseOverBackColor = theme.Hover;
+                b.FlatAppearance.MouseDownBackColor = theme.Press;
+                b.Text = list[i].Text;
+                b.AccessibleName = list[i].Text;
+                if (!string.IsNullOrEmpty(list[i].Tip)) tips.SetToolTip(b, list[i].Tip);
+                // Queued: picking rebuilds these buttons, which mustn't happen inside the button's own click.
+                b.Click += delegate
+                {
+                    if (index < choices.Count) BeginInvoke(choices[index].Pick);
+                };
+                buttons.Add(b);
+                Controls.Add(b);
+            }
+            PerformLayout();
+            Invalidate();
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            int w = Math.Max(0, Math.Min(S(320), Width - S(32))), x = (Width - w) / 2;
+            int bh = S(32), gap = S(6), headingH = S(34), hintH = S(40);
+            int fit = Math.Max(0, (Height - headingH - hintH - S(48)) / (bh + gap));
+            int shown = Math.Min(buttons.Count, fit);
+            int total = headingH + hintH + shown * (bh + gap);
+            int y = Math.Max(S(16), (Height - total) * 2 / 5);
+            headingBounds = new Rectangle(x, y, w, headingH);
+            hintBounds = new Rectangle(x, y + headingH, w, hintH);
+            y += headingH + hintH;
+            for (int i = 0; i < buttons.Count; i++)
+            {
+                buttons[i].Visible = i < shown;
+                buttons[i].SetBounds(x, y, w, bh);
+                y += bh + gap;
+            }
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(theme.Page);
+            TextRenderer.DrawText(g, "Empty pane", headingFont, headingBounds, theme.Fore,
+                TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(g, Hint, textFont, hintBounds, theme.Muted,
+                TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { headingFont.Dispose(); textFont.Dispose(); tips.Dispose(); }
+            base.Dispose(disposing);
         }
     }
 
@@ -198,6 +491,8 @@ namespace Fedatather
         public bool Danger;
         public bool Round;     // circular highlight instead of a rounded square
         public Color Surface;  // colour behind the button
+        public Action<Graphics, Rectangle, Color> Glyph; // drawn instead of the icon-font symbol when set
+        public Font SymbolFont;                          // instead of Icons.Font, for smaller buttons
 
         public IconButton(Theme theme, string symbol)
         {
@@ -272,7 +567,8 @@ namespace Fedatather
                     g.FillPath(b, p);
             }
 
-            TextRenderer.DrawText(g, symbol, Icons.Font, ClientRectangle, fg,
+            if (Glyph != null) { Glyph(g, ClientRectangle, fg); return; }
+            TextRenderer.DrawText(g, symbol, SymbolFont ?? Icons.Font, ClientRectangle, fg,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                 TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
         }
@@ -285,7 +581,8 @@ namespace Fedatather
         readonly Theme theme;
         public readonly TextBox Box;
         public readonly IconButton AppButton;
-        bool showAppButton = true;
+        public readonly IconButton KeyButton; // saved passwords: shown only on sites that have some, to fill them
+        bool showAppButton = true, showKeyButton;
 
         public AddressBox(Theme theme)
         {
@@ -309,6 +606,26 @@ namespace Fedatather
             AppButton.Round = true;
             AppButton.Cursor = Cursors.Default;
             Controls.Add(AppButton);
+
+            KeyButton = new IconButton(theme, Icons.Key);
+            KeyButton.Surface = theme.Field;
+            KeyButton.Round = true;
+            KeyButton.Cursor = Cursors.Default;
+            KeyButton.Active = true; // drawn in the accent colour whenever it's there
+            KeyButton.Visible = false;
+            Controls.Add(KeyButton);
+        }
+
+        public bool ShowKeyButton
+        {
+            get { return showKeyButton; }
+            set
+            {
+                if (showKeyButton == value) return;
+                showKeyButton = value;
+                KeyButton.Visible = value;
+                PerformLayout();
+            }
         }
 
         public bool ShowAppButton
@@ -320,15 +637,20 @@ namespace Fedatather
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
-            if (AppButton == null) return; // layout fires while the constructor is still adding children
+            if (AppButton == null || KeyButton == null) return; // layout fires while the constructor is still adding children
             int pad = Math.Max(6, Height / 2 - 2);
-            int right = Width - pad;
+            int s = Height - 6, x = Width - 3;
             if (showAppButton)
             {
-                int s = Height - 6;
-                AppButton.SetBounds(Width - s - 3, 3, s, s);
-                right = Width - s - 5;
+                AppButton.SetBounds(x - s, 3, s, s);
+                x -= s;
             }
+            if (showKeyButton)
+            {
+                KeyButton.SetBounds(x - s, 3, s, s);
+                x -= s;
+            }
+            int right = showAppButton || showKeyButton ? x - 2 : Width - pad;
             Box.SetBounds(pad, (Height - Box.Height) / 2, Math.Max(0, right - pad), Box.Height);
             if (!Box.Focused) ScrollToStart(); // an edit control keeps its old scroll offset when widened
         }

@@ -32,7 +32,7 @@ def candidates():
 
 def allowed(name):
     path = Path(name)
-    extensions = {'src': {'.cs', '.manifest'}, 'tests': {'.cs', '.ps1', '.py'},
+    extensions = {'src': {'.cs', '.manifest', '.js', '.html'}, 'tests': {'.cs', '.ps1', '.py'},
                   'tools': {'.cs', '.ps1', '.py'}, 'docs': {'.md', '.html', '.svg', '.png'}}
     return name in ROOT_FILES or name in ASSETS or (path.parts[0] in FOLDERS and path.suffix.lower() in extensions[path.parts[0]])
 
